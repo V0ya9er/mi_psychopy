@@ -1,0 +1,130 @@
+# MI PsychoPy 实验默认配置
+# 优先级：CLI 参数 > 用户 YAML > 本文件
+# 用法：python run_mi_experiment.py --config my_config.yaml --trial-mode mi_p300
+
+# ── 通用设置 ──────────────────────────────
+general:
+  fullscreen: true             # 全屏模式（推荐，避免 Windows DWM VSync 限制）
+  fixation: 1.5                # 注视点持续时间（秒）
+  cue: 2.0                     # 提示阶段持续时间（秒）
+  iti: 3.0                     # 试次间间隔持续时间（秒）
+  refresh_rate: 60.0           # 显示器刷新率（Hz）
+  seed: 20260414               # block 级 trial 随机化种子
+  repeats_per_class: 10        # 每 block 每类 trial 重复次数
+  window_style: psychopy       # 窗口模式：psychopy / desktop
+  window_width: 1280           # 窗口宽度（像素，非全屏时生效）
+  window_height: 720           # 窗口高度（像素，非全屏时生效）
+  udp_ip: 127.0.0.1            # OpenBCI GUI Marker Widget 的 UDP 地址
+  udp_port: 12350              # OpenBCI GUI Marker Widget 的 UDP 端口
+  output_dir: mi_psychopy/logs # 日志输出目录
+  image_height: 0.34           # 图片显示高度（PsychoPy height 单位）
+  task_image_scale: 1.80       # 任务阶段图片放大倍率
+  # LabRecorderCLI 设置
+  labrecorder_cli_path: LabRecorder/LabRecorderCLI.exe    # LabRecorderCLI 可执行文件路径
+  labrecorder_study_root: D:/CSDIY/EEG/datasets/customs  # XDF 文件根目录
+  labrecorder_path_template: "%p/%s/%c/%b/%d/run-%n.xdf"    # XDF 路径模板（%p=被试 %s=session %c=class_mode %b=task %d=日期MMDD %n=run）
+  labrecorder_auto_record: true                           # 是否自动启动 LabRecorderCLI 录制
+labrecorder_stream_queries:                             # 要录制的 LSL 流查询条件（LSL resolve predicate）
+  - 'type="EEG"'
+  - 'type="Markers"'
+  - 'type="experiment_metadata"'
+
+# ── 纯 MI ─────────────────────────────────
+pure_mi:
+  imagery: 4.0                  # 运动想象持续时间（秒）
+  cue_image: images/Cue.jpg         # cue 阶段通用回退图片
+  cue_left_image: images/CueLeft.png    # 左手 cue 图片（空则复用 cue_image）
+  cue_right_image: images/CueRight.png  # 右手 cue 图片（空则复用 cue_image）
+  left_image: images/HandLeft_Fist.png  # 左手 MI 任务图片
+  right_image: images/HandRight_Fist.png # 右手 MI 任务图片
+  rest_image: ""                # passive rest 图片（空则复用 cue_image）
+
+# ── AO+MI ─────────────────────────────────
+ao_mi:
+  ao_prime: 3.0                # AO 预激活持续时间（秒）
+  ao_mi: 3.5                  # AO+MI 重叠持续时间（秒）
+  mi_only: 2.0                  # AO 结束后 MI-only 尾段持续时间（秒）
+  ao_left_image: ""             # 左手 AO 单图素材（空则复用 pure_mi.left_image）
+  ao_right_image: ""            # 右手 AO 单图素材（空则复用 pure_mi.right_image）
+  ao_video: images/EEG_Motor_Imagery_Stimulus_Video_Generation.mp4  # AO 视频文件（仅左手，右手自动镜像）
+  ao_video_start: 2.0           # 视频起始秒数（跳过开头静止段）
+
+# ── MI+SSVEP ──────────────────────────────
+mi_ssvep:
+  duration: 4.5                 # MI+SSVEP hybrid task 持续时间（秒）
+  left_freq: 10.0               # 左侧闪烁频率（Hz）
+  right_freq: 15.0              # 右侧闪烁频率（Hz），避免与左手频率成整数倍（谐波重叠）
+  flicker_mode: image          # 闪烁模式：border（边框闪烁）/ image（图片 opacity 闪烁）
+  waveform: square             # 闪烁波形：square（方波，更强 SSVEP 信号）/ sine（正弦波，更舒适）
+  border_width: 4.0             # 边框宽度（border 模式，值越大刺激面积越大）
+  dim_opacity: 0.0              # image 模式 OFF 态 opacity（0=不可见，1=完全可见）
+  left_clean_image: images/HandLeft_Fist_Clean.png   # 左手去背景透明 PNG（image 模式）
+  right_clean_image: images/HandRight_Fist_Clean.png # 右手去背景透明 PNG（image 模式）
+  allow_gaze_shift: true       # 是否允许被试注视目标侧闪烁
+  display_mode: single_side     # 显示模式： both_sides (双侧同时闪烁)/ single_center (仅目标侧居中)/ single_side (仅目标侧原位)
+  box_width: 0.35               # SSVEP 图片框宽度（PsychoPy height 单位）
+  box_height: 0.35              # SSVEP 图片框高度（PsychoPy height 单位）
+  y_pos: -0.02                  # SSVEP 图片垂直位置
+  left_x: -0.38                 # 左侧图片水平位置
+  right_x: 0.38                 # 右侧图片水平位置
+
+# ── MI+P300 ───────────────────────────────
+# P300 闪光参数：SOA=300ms, duration=5s → ~16 次闪光, 4 次目标
+# 目标闪烁等间隔分布，起始相位随机，确保 oddball 意外性
+mi_p300:
+  duration: 5.0                 # MI+P300 hybrid task 持续时间（秒）
+  soa: 0.300                    # 闪光事件间隔 SOA（秒）
+  flash_duration: 0.120         # 单次闪光持续时间（秒）
+  seed: 42                      # 闪光序列随机种子
+  target_probability: 0.25      # 目标侧闪烁概率
+  flicker_mode: image          # 闪光模式：border（边框闪光）/ image（图片 opacity 闪光）
+  border_width: 6.0             # 边框宽度（border 模式，值越大刺激面积越大）
+  dim_opacity: 0.0              # image 模式 OFF 态 opacity（0=不可见，1=完全可见）
+  box_width: 0.26               # P300 图片框宽度（PsychoPy height 单位）
+  box_height: 0.26              # P300 图片框高度（PsychoPy height 单位）
+  y_pos: -0.02                  # P300 图片垂直位置
+  left_x: -0.38                 # 左侧图片水平位置
+  right_x: 0.38                 # 右侧图片水平位置
+
+# ── MI+Arrow ───────────────────────────────
+mi_arrow:
+  imagery: 4.0                  # 运动想象持续时间（秒），复用 general.imagery
+  cue_duration: 2.0             # cue 持续时间（秒），复用 general.cue
+  arrow_style: unicode          # 箭头样式：unicode（←→）/ shape（PsychoPy ShapeStim）
+  arrow_color: white            # 箭头颜色
+  arrow_height: 0.20            # 箭头大小（PsychoPy height 单位）
+
+# ── MI+SSVEP Arousal ──────────────────────
+mi_ssvep_arousal:
+  duration: 4.5                 # task 持续时间（秒）
+  freq_mode: fixed              # fixed / random
+  fixed_freq_hz: 20.0           # fixed 模式下的频率
+  freq_min_hz: 18.0             # random 模式下最小频率
+  freq_max_hz: 25.0             # random 模式下最大频率
+  waveform: sine                # square / sine（推荐 sine 给高频）
+  cue_style: arrow              # arrow / image
+  task_style: arrow             # arrow / image
+  stimulus_size: 0.35           # 刺激尺寸（width height in PsychoPy height units）
+  dim_opacity: 0.0              # image 模式 OFF-state opacity
+  arrow_color: white            # 箭头颜色
+  arrow_height: 0.20            # 箭头大小（PsychoPy height 单位）
+
+# ── 串行 SSVEP→MI ──────────────────────────
+mi_ssvep_serial:
+  cue_ssvep_freq_left_hz: 10.0  # cue 段左条件 SSVEP 频率
+  cue_ssvep_freq_right_hz: 15.0 # cue 段右条件 SSVEP 频率
+  cue_ssvep_mode: frequency_coded  # frequency_coded (频率编码方向) / same_freq (相同频率不编码方向)
+  same_freq_hz: 20.0            # same_freq 模式下的频率
+  cue_ssvep_duration_s: 2.0     # cue 段 SSVEP 持续时间
+  gap_duration_s: 2.0           # 间隔持续时间
+  mi_duration_s: 4.0            # pure MI 任务持续时间
+  waveform: sine                # square / sine
+  cue_style: arrow              # arrow / image cue 样式
+  task_style: arrow             # arrow / image task 样式
+  display_mode: single_center   # single_center / both_sides 显示模式
+  stimulus_width: 0.35          # 刺激宽度
+  stimulus_height: 0.35         # 刺激高度
+  border_width: 4.0             # 边框宽度
+  dim_opacity: 0.0              # OFF 态 opacity
+  arrow_color: white            # 箭头颜色
+  arrow_height: 0.20            # 箭头高度

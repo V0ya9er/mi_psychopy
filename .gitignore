@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# PsychoPy legacy data (old format, now uses logs/)
+data/
+
+# Experiment output
+logs/
+
+# Dialog cache
+.last_session.json
+
+# Sisyphus working directory
+.sisyphus/
+
+# Archive (not tracked)
+archive/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
