@@ -4765,18 +4765,43 @@ def show_session_dialog(args: argparse.Namespace,
         row=4, column=1, sticky="w", pady=2, padx=(10, 0))
     ttk.Label(ssvep_rt_frame, text="（默认0.6）").grid(row=4, column=2, sticky="w", pady=2)
 
-    # SSVEP settings (reuse pattern from ssvep_frame)
-    ttk.Label(ssvep_rt_frame, text="左手频率").grid(row=5, column=0, sticky="w", pady=2)
+    # SSVEP display settings (reuse pattern from ssvep_frame)
+    ttk.Label(ssvep_rt_frame, text="闪烁模式").grid(row=5, column=0, sticky="w", pady=2)
+    ssvep_rt_flicker_mode_var = tk.StringVar(value=str(defaults.get("ssvep_rt_flicker_mode", "border")))
+    ttk.Combobox(ssvep_rt_frame, textvariable=ssvep_rt_flicker_mode_var,
+                 values=["image", "border"], state="readonly", width=10).grid(
+        row=5, column=1, sticky="w", pady=2, padx=(10, 0))
+    ttk.Label(ssvep_rt_frame, text="(image=图片透明度闪烁, border=边框颜色闪烁)").grid(
+        row=5, column=2, sticky="w", pady=2, padx=(5, 0))
+
+    ttk.Label(ssvep_rt_frame, text="闪烁波形").grid(row=6, column=0, sticky="w", pady=2)
+    ssvep_rt_waveform_var = tk.StringVar(value=str(defaults.get("ssvep_rt_waveform", "square")))
+    ttk.Combobox(ssvep_rt_frame, textvariable=ssvep_rt_waveform_var,
+                 values=["square", "sine"], state="readonly", width=10).grid(
+        row=6, column=1, sticky="w", pady=2, padx=(10, 0))
+    ttk.Label(ssvep_rt_frame, text="(square=方波更强信号, sine=正弦更舒适)").grid(
+        row=6, column=2, sticky="w", pady=2, padx=(5, 0))
+
+    ttk.Label(ssvep_rt_frame, text="左手频率").grid(row=7, column=0, sticky="w", pady=2)
     ssvep_rt_left_freq_var = tk.StringVar(value=str(defaults.get("ssvep_rt_left_freq_hz", 10.0)))
     ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_left_freq_var, width=8).grid(
-        row=5, column=1, sticky="w", pady=2, padx=(10, 0))
-    ttk.Label(ssvep_rt_frame, text="Hz").grid(row=5, column=2, sticky="w", pady=2)
+        row=7, column=1, sticky="w", pady=2, padx=(10, 0))
+    ttk.Label(ssvep_rt_frame, text="Hz").grid(row=7, column=2, sticky="w", pady=2)
 
-    ttk.Label(ssvep_rt_frame, text="右手频率").grid(row=6, column=0, sticky="w", pady=2)
+    ttk.Label(ssvep_rt_frame, text="右手频率").grid(row=8, column=0, sticky="w", pady=2)
     ssvep_rt_right_freq_var = tk.StringVar(value=str(defaults.get("ssvep_rt_right_freq_hz", 15.0)))
     ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_right_freq_var, width=8).grid(
-        row=6, column=1, sticky="w", pady=2, padx=(10, 0))
-    ttk.Label(ssvep_rt_frame, text="Hz").grid(row=6, column=2, sticky="w", pady=2)
+        row=8, column=1, sticky="w", pady=2, padx=(10, 0))
+    ttk.Label(ssvep_rt_frame, text="Hz").grid(row=8, column=2, sticky="w", pady=2)
+
+    ttk.Label(ssvep_rt_frame, text="显示模式").grid(row=9, column=0, sticky="w", pady=2)
+    ssvep_rt_display_mode_var = tk.StringVar(value=str(defaults.get("ssvep_rt_display_mode", "single_side")))
+    ttk.Combobox(ssvep_rt_frame, textvariable=ssvep_rt_display_mode_var,
+                 values=["single_side", "both_sides", "single_center"],
+                 state="readonly", width=12).grid(
+        row=9, column=1, sticky="w", pady=2, padx=(10, 0))
+    ttk.Label(ssvep_rt_frame, text="(single_side=仅目标侧, both_sides=双侧, single_center=居中)").grid(
+        row=9, column=2, sticky="w", pady=2, padx=(5, 0))
 
     # Show/hide SSVEP/P300/SSVEP Arousal/SSVEP Serial/SSVEP RT frame based on trial_mode
     ssvep_frame_row = row - 5  # remember the grid row for re-showing
@@ -5068,6 +5093,9 @@ def show_session_dialog(args: argparse.Namespace,
             result["ssvep_serial_arrow_height"] = 0.20
         # SSVEP RT specific overrides (only relevant when trial_mode == mi_ssvep_rt)
         result["ssvep_rt_mi_checkpoint_path"] = ssvep_rt_checkpoint_var.get()
+        result["ssvep_rt_flicker_mode"] = ssvep_rt_flicker_mode_var.get()
+        result["ssvep_rt_waveform"] = ssvep_rt_waveform_var.get()
+        result["ssvep_rt_display_mode"] = ssvep_rt_display_mode_var.get()
         try:
             result["ssvep_rt_classifier_window_s"] = float(ssvep_rt_window_var.get() or "1.0")
         except ValueError:
