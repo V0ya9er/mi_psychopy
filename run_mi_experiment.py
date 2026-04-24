@@ -312,6 +312,243 @@ class LabRecorderCLIController:
         return (False, error_msg)
 
 
+class LslCsvRecorder:
+    """Record raw EEG + marker data from LSL streams to CSV.
+
+    Pulls samples from resolved LSL streams in a background thread and writes
+    them to a CSV file in a format compatible with legacy recordings.
+
+    CSV format:
+      - Row 1: channel index header (0, 1, 2, ..., N)
+      - Subsequent rows: marker_value, ch0, ch1, ..., ch7
+
+    Marker mode:
+      - ``"legacy"``: Map markers to 0/1/2 (0=other, 1=left, 2=right) for
+        backward compatibility with older processing pipelines.
+      - ``"detailed"``: Use the actual numeric marker values (5, 11, 12, 21,
+        22, etc.) as defined in ``markers.py``.
+    """
+
+    # Mapping from detailed marker values to legacy 0/1/2
+    _LEGACY_MARKER_MAP: dict[int, int] = {}
+    _LEGACY_LEFT_MARKERS: set[int] = set()
+    _LEGACY_RIGHT_MARKERS: set[int] = set()
+
+    @classmethod
+    def _build_legacy_map(cls) -> None:
+        """Build the legacy marker mapping from markers.py MARKERS dict."""
+        if cls._LEGACY_MARKER_MAP:
+            return  # Already built
+        # Left-hand markers (cue + task phases) → legacy 1
+        left_keys = [k for k in MARKERS if "left" in k.lower()]
+        # Right-hand markers (cue + task phases) → legacy 2
+        right_keys = [k for k in MARKERS if "right" in k.lower()]
+        # Everything else → legacy 0
+        for k in left_keys:
+            cls._LEGACY_MARKER_MAP[MARKERS[k]] = 1
+            cls._LEGACY_LEFT_MARKERS.add(MARKERS[k])
+        for k in right_keys:
+            cls._LEGACY_MARKER_MAP[MARKERS[k]] = 2
+            cls._LEGACY_RIGHT_MARKERS.add(MARKERS[k])
+
+    def __init__(
+        self,
+        csv_path: str,
+        marker_mode: str = "legacy",
+        eeg_query: str = 'type="EEG"',
+        marker_query: str = 'type="Markers"',
+        resolve_timeout: float = 10.0,
+    ) -> None:
+        self._csv_path = csv_path
+        self._marker_mode = marker_mode
+        self._eeg_query = eeg_query
+        self._marker_query = marker_query
+        self._resolve_timeout = resolve_timeout
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._error: str = ""
+        self._samples_written = 0
+        self._file: Any = None
+        self._writer: Any = None
+        self._eeg_inlet: Any = None
+        self._marker_inlet: Any = None
+
+    def start_recording(self) -> str:
+        """Start the CSV recording thread.
+
+        Resolves LSL streams, opens the CSV file, and starts pulling samples
+        in a background thread. Returns the CSV file path.
+
+        Raises ``RuntimeError`` if pylsl is not installed or streams cannot
+        be resolved.
+        """
+        if pylsl is None:
+            raise RuntimeError("pylsl 未安装，无法录制 CSV")
+
+        self._build_legacy_map()
+
+        # Resolve LSL streams
+        eeg_streams = pylsl.resolve_byprop(
+            "type", "EEG", timeout=self._resolve_timeout, minimum=1,
+        )
+        if not eeg_streams:
+            # Try the configured query as fallback
+            try:
+                eeg_streams = pylsl.resolve_stream(
+                    self._resolve_timeout,
+                    minimum=1,
+                    **self._parse_query(self._eeg_query),
+                )
+            except Exception:
+                pass
+        if not eeg_streams:
+            raise RuntimeError(
+                f"无法解析 LSL EEG 流 (query={self._eeg_query!r}, "
+                f"timeout={self._resolve_timeout}s)"
+            )
+
+        marker_streams = pylsl.resolve_byprop(
+            "type", "Markers", timeout=self._resolve_timeout, minimum=1,
+        )
+
+        self._eeg_inlet = pylsl.StreamInlet(eeg_streams[0], max_buflen=360)
+        self._marker_inlet = (
+            pylsl.StreamInlet(marker_streams[0], max_buflen=360)
+            if marker_streams else None
+        )
+
+        # Open CSV file and write header
+        csv_path = Path(self._csv_path)
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        n_ch = self._eeg_inlet.info().channel_count()
+        self._file = csv_path.open("w", newline="", encoding="utf-8")
+        self._writer = csv.writer(self._file)
+        # Header row: marker + channel indices
+        self._writer.writerow(list(range(n_ch + 1)))
+        self._file.flush()
+
+        # Start recording thread
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._recording_loop,
+            daemon=True,
+            name="LslCsvRecorder",
+        )
+        self._thread.start()
+        print(
+            f"LslCsvRecorder 已启动, CSV: {csv_path} "
+            f"(marker_mode={self._marker_mode}, channels={n_ch})"
+        )
+        return self._csv_path
+
+    @staticmethod
+    def _parse_query(query: str) -> dict[str, str]:
+        """Parse an LSL query string like 'type=\"EEG\"' into kwargs."""
+        import re
+        kwargs: dict[str, str] = {}
+        for match in re.finditer(r'(\w+)="([^"]+)"', query):
+            kwargs[match.group(1)] = match.group(2)
+        return kwargs
+
+    def _recording_loop(self) -> None:
+        """Background thread: pull LSL samples and write to CSV."""
+        marker_value = 0.0  # Current marker (held until next marker arrives)
+        try:
+            while not self._stop_event.is_set():
+                # Pull marker (non-blocking)
+                if self._marker_inlet is not None:
+                    try:
+                        sample, _ts = self._marker_inlet.pull_sample(timeout=0.0)
+                        if sample is not None:
+                            marker_value = float(sample[0])
+                    except Exception:
+                        pass
+
+                # Pull EEG samples (small timeout to avoid busy-wait)
+                try:
+                    sample, _ts = self._eeg_inlet.pull_sample(timeout=0.01)
+                    if sample is not None:
+                        if self._marker_mode == "legacy":
+                            # Convert detailed marker to legacy 0/1/2
+                            int_marker = int(round(marker_value))
+                            csv_marker = self._LEGACY_MARKER_MAP.get(int_marker, 0)
+                        else:
+                            csv_marker = marker_value
+                        row = [csv_marker] + [float(v) for v in sample]
+                        self._writer.writerow(row)
+                        self._samples_written += 1
+                        # Flush every 256 samples to keep file up-to-date
+                        if self._samples_written % 256 == 0:
+                            self._file.flush()
+                except Exception:
+                    pass
+
+        except Exception as exc:
+            self._error = str(exc)
+        finally:
+            if self._file is not None:
+                try:
+                    self._file.flush()
+                except Exception:
+                    pass
+
+    def stop_recording(self) -> None:
+        """Stop the recording thread and close the CSV file."""
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+            self._thread = None
+
+        # Drain remaining EEG samples from buffer
+        if self._eeg_inlet is not None:
+            try:
+                while True:
+                    sample, _ts = self._eeg_inlet.pull_sample(timeout=0.0)
+                    if sample is None:
+                        break
+                    # Use the last known marker
+                    csv_marker = 0
+                    if self._marker_mode == "legacy":
+                        pass  # Already 0 at drain time
+                    row = [csv_marker] + [float(v) for v in sample]
+                    self._writer.writerow(row)
+                    self._samples_written += 1
+            except Exception:
+                pass
+
+        if self._file is not None:
+            try:
+                self._file.close()
+            except Exception:
+                pass
+            self._file = None
+
+        csv_path = Path(self._csv_path)
+        if csv_path.exists() and csv_path.stat().st_size > 0:
+            print(
+                f"LslCsvRecorder 已停止, CSV 已保存: {csv_path} "
+                f"({self._samples_written} samples)"
+            )
+        else:
+            print(f"LslCsvRecorder 已停止, 但 CSV 文件为空或不存在: {csv_path}")
+
+    @property
+    def is_recording(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def samples_written(self) -> int:
+        return self._samples_written
+
+    @property
+    def error(self) -> str:
+        return self._error
+
+    @property
+    def csv_path(self) -> str:
+        return self._csv_path
+
+
 class RTClassifierManager:
     """Manage the realtime_classifier.py subprocess."""
 
@@ -1250,6 +1487,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fullscreen", action="store_true", help="全屏模式")
     parser.add_argument("--display-index", type=int, default=0, help="PsychoPy screen 索引（0=主屏，1=副屏，从0开始）")
     parser.add_argument("--study-root", default=None, help="XDF 数据根目录（覆盖 YAML 配置）")
+    parser.add_argument("--recording-format", choices=["xdf", "csv", "both"], default=None, help="录制格式：xdf/csv/both（覆盖 YAML 配置）")
+    parser.add_argument("--csv-marker-mode", choices=["legacy", "detailed"], default=None, help="CSV marker 模式：legacy(0/1/2)/detailed(实际值)（覆盖 YAML 配置）")
     parser.add_argument("--refresh-rate", type=float, default=None, help="显示器刷新率 Hz（覆盖 YAML 配置，SSVEP/P300 需要）")
     parser.add_argument("--config", default="config_default.yaml", help="YAML 配置文件路径")
     # SSVEP Arousal specific arguments (overrides YAML)
@@ -1312,6 +1551,8 @@ _YAML_TO_FLAT: dict[tuple[str, str], str] = {
     ("general", "labrecorder_path_template"): "labrecorder_path_template",
     ("general", "labrecorder_auto_record"): "labrecorder_auto_record",
     ("general", "labrecorder_stream_queries"): "labrecorder_stream_queries",
+    ("general", "labrecorder_recording_format"): "labrecorder_recording_format",
+    ("general", "labrecorder_csv_marker_mode"): "labrecorder_csv_marker_mode",
     # pure_mi
     ("pure_mi", "imagery"): "imagery",
     ("pure_mi", "cue_image"): "cue_image",
@@ -1465,6 +1706,10 @@ def resolve_config(cli_args: argparse.Namespace, yaml_dict: dict[str, Any]) -> d
         cli_overrides["repeats_per_class"] = cli_args.repeats_per_class
     if getattr(cli_args, "study_root", None) is not None:
         cli_overrides["labrecorder_study_root"] = cli_args.study_root
+    if getattr(cli_args, "recording_format", None) is not None:
+        cli_overrides["labrecorder_recording_format"] = cli_args.recording_format
+    if getattr(cli_args, "csv_marker_mode", None) is not None:
+        cli_overrides["labrecorder_csv_marker_mode"] = cli_args.csv_marker_mode
     if getattr(cli_args, "refresh_rate", None) is not None:
         cli_overrides["refresh_rate"] = cli_args.refresh_rate
     # SSVEP-specific overrides from session dialog
@@ -1671,6 +1916,10 @@ def build_config(args: argparse.Namespace) -> ExperimentConfig:
         raise SystemExit("AO+MI / MI+SSVEP / MI+P300 / MI-Arrow / SSVEP Arousal / Serial SSVEP→MI 首版仅支持 binary 模式。请使用 --class-mode binary。")
     if c["refresh_rate"] <= 0:
         raise SystemExit("general.refresh_rate 必须为正数。")
+    if c.get("labrecorder_recording_format", "xdf") not in ("xdf", "csv", "both"):
+        raise SystemExit("general.labrecorder_recording_format 必须为 xdf / csv / both。")
+    if c.get("labrecorder_csv_marker_mode", "legacy") not in ("legacy", "detailed"):
+        raise SystemExit("general.labrecorder_csv_marker_mode 必须为 legacy / detailed。")
     if c["ssvep_left_freq"] <= 0 or c["ssvep_right_freq"] <= 0:
         raise SystemExit("mi_ssvep.left_freq / right_freq 必须为正数。")
     if c["ssvep_border_width"] <= 0:
@@ -1892,6 +2141,8 @@ def build_config(args: argparse.Namespace) -> ExperimentConfig:
             path_template=c.get("labrecorder_path_template", "%p/%s/%c/%b/run-%n.xdf"),
             auto_record=c.get("labrecorder_auto_record", True),
             stream_queries=tuple(c.get("labrecorder_stream_queries", ('type="EEG"', 'type="Markers"'))),
+            recording_format=c.get("labrecorder_recording_format", "xdf"),
+            csv_marker_mode=c.get("labrecorder_csv_marker_mode", "legacy"),
         ),
         session_cfg=SessionConfig(
             mode=c["mode"],
@@ -3708,7 +3959,7 @@ def run_session(config: ExperimentConfig) -> int:
     publish_experiment_metadata(config)
     write_session_config_json(config, run_dir)
 
-    # ── Check LSL streams before starting LabRecorderCLI ──
+    # ── Check LSL streams before starting recording ──
     lsl_check = _check_lsl_streams(config.labrecorder.stream_queries)
     print(f"LSL 流检测: {lsl_check['message']}")
     for result in lsl_check["results"]:
@@ -3719,10 +3970,12 @@ def run_session(config: ExperimentConfig) -> int:
             print(f"      → name={info['name']}, type={info['type']}, "
                   f"ch={info['channel_count']}, rate={info['nominal_srate']}Hz")
 
+    recording_format = config.labrecorder.recording_format
+
     # ── Start LabRecorderCLI for automatic XDF recording ──
     lr = LabRecorderCLIController(config.labrecorder)
     xdf_path = ""
-    if config.labrecorder.auto_record:
+    if config.labrecorder.auto_record and recording_format in ("xdf", "both"):
         try:
             xdf_path = lr.start_recording(
                 participant=config.participant,
@@ -3734,6 +3987,37 @@ def run_session(config: ExperimentConfig) -> int:
         except Exception as exc:
             print(f"WARNING: LabRecorderCLI 启动失败: {exc}")
             print("将不录制 XDF 文件。如需录制，请手动启动 LabRecorder。")
+
+    # ── Start LslCsvRecorder for CSV recording ──
+    csv_recorder: LslCsvRecorder | None = None
+    raw_csv_path = ""
+    if config.labrecorder.auto_record and recording_format in ("csv", "both"):
+        # Build CSV path in the same directory structure as XDF
+        # Resolve the path template but replace .xdf with .csv
+        from datetime import datetime
+        csv_path_template = config.labrecorder.path_template
+        csv_path_str = config.labrecorder.study_root.rstrip("/")
+        csv_path_str += "/" + csv_path_template.replace("%p", config.participant)
+        csv_path_str = csv_path_str.replace("%s", config.session)
+        csv_path_str = csv_path_str.replace("%c", config.session_cfg.class_mode)
+        csv_path_str = csv_path_str.replace("%b", config.session_cfg.trial_mode)
+        csv_path_str = csv_path_str.replace("%n", str(config.run))
+        csv_path_str = csv_path_str.replace("%d", datetime.now().strftime("%m%d"))
+        csv_path_str = csv_path_str.replace(".xdf", ".csv")
+        # Legacy naming: mi + timestamp
+        legacy_csv_name = f"mi{datetime.now().strftime('%Y%m%d%H%M%S')}.csv"
+        # Place in the same directory as the XDF would go
+        raw_csv_path = csv_path_str
+        try:
+            csv_recorder = LslCsvRecorder(
+                csv_path=raw_csv_path,
+                marker_mode=config.labrecorder.csv_marker_mode,
+            )
+            csv_recorder.start_recording()
+        except Exception as exc:
+            print(f"WARNING: LslCsvRecorder 启动失败: {exc}")
+            print("将不录制 CSV 文件。")
+            csv_recorder = None
 
     logger = EventLogger(csv_path, config)
     sender = UdpMarkerSender(config.network, logger)
@@ -3798,7 +4082,12 @@ def run_session(config: ExperimentConfig) -> int:
         except Exception as exc:
             _rt_logger.warning("mi_ssvep_rt: feedback display connection error: %s", exc)
 
-    lr_status = f"XDF [OK] {xdf_path}" if lr.is_recording else "XDF [OFF] not recording"
+    lr_status_parts = []
+    if recording_format in ("xdf", "both"):
+        lr_status_parts.append(f"XDF [{'OK' if lr.is_recording else 'OFF'}] {xdf_path}" if lr.is_recording else "XDF [OFF] not recording")
+    if recording_format in ("csv", "both"):
+        lr_status_parts.append(f"CSV [{'OK' if csv_recorder and csv_recorder.is_recording else 'OFF'}] {raw_csv_path}" if csv_recorder and csv_recorder.is_recording else "CSV [OFF] not recording")
+    lr_status = " | ".join(lr_status_parts) if lr_status_parts else "Recording [OFF]"
 
     # Build refresh rate status line for display
     if hz_deviation_pct > 2.0:
@@ -3908,7 +4197,7 @@ def run_session(config: ExperimentConfig) -> int:
 
             for trial in block:
                 # Check recording status before each trial
-                if config.labrecorder.auto_record and lr.is_recording:
+                if config.labrecorder.auto_record and lr.is_recording and recording_format in ("xdf", "both"):
                     is_ok, error_msg = lr.check_recording_status()
                     if not is_ok:
                         # Recording lost - warn user
@@ -3969,6 +4258,10 @@ def run_session(config: ExperimentConfig) -> int:
         # Stop LabRecorderCLI — XDF file is finalized
         lr.stop_recording()
 
+        # Stop CSV recorder — CSV file is finalized
+        if csv_recorder is not None:
+            csv_recorder.stop_recording()
+
         # Check if XDF file actually has data
         xdf_ok = xdf_path and Path(xdf_path).exists() and Path(xdf_path).stat().st_size > 0
         if xdf_ok:
@@ -3978,12 +4271,30 @@ def run_session(config: ExperimentConfig) -> int:
         else:
             xdf_msg = "No XDF was recorded (LabRecorderCLI not started)."
 
+        # Check if CSV file actually has data
+        csv_ok = raw_csv_path and Path(raw_csv_path).exists() and Path(raw_csv_path).stat().st_size > 0
+        csv_samples = csv_recorder.samples_written if csv_recorder is not None else 0
+        if csv_ok:
+            csv_msg = f"CSV saved to: {raw_csv_path}\n({csv_samples} samples, marker_mode={config.labrecorder.csv_marker_mode})"
+        elif raw_csv_path:
+            csv_msg = f"CSV file is empty: {raw_csv_path}\n(no LSL streams were available — was OpenBCI GUI running?)"
+        else:
+            csv_msg = ""
+
+        # Build combined recording status message
+        recording_msgs = []
+        if recording_format in ("xdf", "both"):
+            recording_msgs.append(xdf_msg)
+        if recording_format in ("csv", "both") and csv_msg:
+            recording_msgs.append(csv_msg)
+        recording_msg = "\n".join(recording_msgs) if recording_msgs else "No data recording was configured."
+
         complete_redraw = show_text_screen(
             ui,
             title="Session complete",
             body=(
                 "The local plan and event logs have been saved.\n"
-                + xdf_msg
+                + recording_msg
             ),
         )
         wait_for_space_or_abort(
@@ -3996,6 +4307,9 @@ def run_session(config: ExperimentConfig) -> int:
         logger.log_event("session_aborted", note="ESC pressed by operator")
         # Stop LabRecorderCLI on ESC — XDF file is saved up to this point
         lr.stop_recording()
+        # Stop CSV recorder on ESC — CSV file is saved up to this point
+        if csv_recorder is not None:
+            csv_recorder.stop_recording()
         # Check if XDF file actually has data
         xdf_ok = xdf_path and Path(xdf_path).exists() and Path(xdf_path).stat().st_size > 0
         if xdf_ok:
@@ -4012,10 +4326,18 @@ def run_session(config: ExperimentConfig) -> int:
         else:
             xdf_msg = "Check the local CSV log and decide whether the data should be discarded."
 
+        # Check if raw CSV file actually has data
+        csv_ok = raw_csv_path and Path(raw_csv_path).exists() and Path(raw_csv_path).stat().st_size > 0
+        csv_msg = ""
+        if csv_ok and csv_recorder is not None:
+            csv_msg = f"\nCSV saved to: {raw_csv_path} ({csv_recorder.samples_written} samples)"
+        elif raw_csv_path:
+            csv_msg = f"\nCSV file is empty: {raw_csv_path}"
+
         aborted_redraw = show_text_screen(
             ui,
             title="Session aborted",
-            body="The session was interrupted safely.\n" + xdf_msg,
+            body="The session was interrupted safely.\n" + xdf_msg + csv_msg,
         )
         event.clearEvents()
         while True:
@@ -4065,6 +4387,12 @@ def run_session(config: ExperimentConfig) -> int:
         # Ensure LabRecorderCLI is stopped regardless of exit path
         try:
             lr.stop_recording()
+        except Exception:
+            pass
+        # Ensure CSV recorder is stopped regardless of exit path
+        try:
+            if csv_recorder is not None:
+                csv_recorder.stop_recording()
         except Exception:
             pass
         try:
@@ -4258,6 +4586,8 @@ def _load_dialog_defaults(args: argparse.Namespace) -> dict[str, Any]:
     flat = _flatten_yaml(yaml_dict)
     defaults: dict[str, Any] = {
         "study_root": flat.get("labrecorder_study_root", ""),
+        "recording_format": flat.get("labrecorder_recording_format", "xdf"),
+        "csv_marker_mode": flat.get("labrecorder_csv_marker_mode", "legacy"),
         "participant": args.participant,
         "session": args.session,
         "run": args.run,
@@ -4269,13 +4599,47 @@ def _load_dialog_defaults(args: argparse.Namespace) -> dict[str, Any]:
         "fullscreen": flat.get("fullscreen", True),
         "blocks": flat.get("blocks", 2),
         "repeats_per_class": flat.get("repeats_per_class", 10),
+        # SSVEP (mi_ssvep / pure_ssvep)
         "ssvep_flicker_mode": flat.get("ssvep_flicker_mode", "image"),
         "ssvep_waveform": flat.get("ssvep_waveform", "square"),
         "ssvep_display_mode": flat.get("ssvep_display_mode", "single_side"),
         "ssvep_left_freq": flat.get("ssvep_left_freq", 10.0),
         "ssvep_right_freq": flat.get("ssvep_right_freq", 15.0),
+        # P300
         "p300_flicker_mode": flat.get("p300_flicker_mode", "image"),
         "p300_target_probability": flat.get("p300_target_probability", 0.25),
+        # SSVEP Arousal
+        "ssvep_arousal_freq_mode": flat.get("ssvep_arousal_freq_mode", "fixed"),
+        "ssvep_arousal_fixed_freq_hz": flat.get("ssvep_arousal_fixed_freq_hz", 12.0),
+        "ssvep_arousal_freq_min_hz": flat.get("ssvep_arousal_freq_min_hz", 8.0),
+        "ssvep_arousal_freq_max_hz": flat.get("ssvep_arousal_freq_max_hz", 15.0),
+        "ssvep_arousal_waveform": flat.get("ssvep_arousal_waveform", "sine"),
+        "ssvep_arousal_stimulus_size": flat.get("ssvep_arousal_stimulus_size", 0.34),
+        "ssvep_arousal_dim_opacity": flat.get("ssvep_arousal_dim_opacity", 0.0),
+        # SSVEP Serial
+        "ssvep_serial_cue_ssvep_freq_left_hz": flat.get("ssvep_serial_cue_ssvep_freq_left_hz", 10.0),
+        "ssvep_serial_cue_ssvep_freq_right_hz": flat.get("ssvep_serial_cue_ssvep_freq_right_hz", 15.0),
+        "ssvep_serial_cue_ssvep_mode": flat.get("ssvep_serial_cue_ssvep_mode", "freq_coded"),
+        "ssvep_serial_same_freq_hz": flat.get("ssvep_serial_same_freq_hz", 12.0),
+        "ssvep_serial_cue_ssvep_duration_s": flat.get("ssvep_serial_cue_ssvep_duration_s", 3.0),
+        "ssvep_serial_gap_duration_s": flat.get("ssvep_serial_gap_duration_s", 1.0),
+        "ssvep_serial_mi_duration_s": flat.get("ssvep_serial_mi_duration_s", 4.0),
+        "ssvep_serial_waveform": flat.get("ssvep_serial_waveform", "sine"),
+        "ssvep_serial_display_mode": flat.get("ssvep_serial_display_mode", "single_center"),
+        "ssvep_serial_stimulus_width": flat.get("ssvep_serial_stimulus_width", 0.34),
+        "ssvep_serial_stimulus_height": flat.get("ssvep_serial_stimulus_height", 0.34),
+        "ssvep_serial_border_width": flat.get("ssvep_serial_border_width", 4.0),
+        "ssvep_serial_dim_opacity": flat.get("ssvep_serial_dim_opacity", 0.0),
+        # SSVEP RT (mi_ssvep_rt)
+        "ssvep_rt_mi_checkpoint_path": flat.get("ssvep_rt_mi_checkpoint_path", ""),
+        "ssvep_rt_classifier_window_s": flat.get("ssvep_rt_classifier_window_s", 1.0),
+        "ssvep_rt_classifier_stride_s": flat.get("ssvep_rt_classifier_stride_s", 0.25),
+        "ssvep_rt_confidence_threshold": flat.get("ssvep_rt_confidence_threshold", 0.6),
+        "ssvep_rt_left_freq_hz": flat.get("ssvep_rt_left_freq_hz", 10.0),
+        "ssvep_rt_right_freq_hz": flat.get("ssvep_rt_right_freq_hz", 15.0),
+        "ssvep_rt_flicker_mode": flat.get("ssvep_rt_flicker_mode", "border"),
+        "ssvep_rt_waveform": flat.get("ssvep_rt_waveform", "square"),
+        "ssvep_rt_display_mode": flat.get("ssvep_rt_display_mode", "single_side"),
     }
     # 2. Override with saved values
     if _LAST_SESSION_FILE.exists():
@@ -4352,6 +4716,45 @@ def show_session_dialog(args: argparse.Namespace,
     browse_btn = ttk.Button(main_frame, text="浏览", command=_browse_study_root, width=5)
     browse_btn.grid(row=row, column=2, padx=(5, 0), pady=4)
     row += 1
+
+    # ── Recording format dropdown ──
+    ttk.Label(main_frame, text="录制格式").grid(row=row, column=0, sticky="w", pady=4)
+    recording_format_var = tk.StringVar(value=str(defaults.get("recording_format", "xdf")))
+    recording_format_combo = ttk.Combobox(
+        main_frame, textvariable=recording_format_var,
+        values=["xdf", "csv", "both"], state="readonly", width=10,
+    )
+    recording_format_combo.grid(row=row, column=1, sticky="w", pady=4, padx=(10, 0))
+    recording_format_hint = ttk.Label(main_frame, text="(xdf=仅XDF, csv=仅CSV, both=同时录制)")
+    recording_format_hint.grid(row=row, column=2, sticky="w", pady=4, padx=(5, 0))
+    row += 1
+
+    # ── CSV marker mode dropdown (only visible when format is csv or both) ──
+    csv_marker_mode_label = ttk.Label(main_frame, text="CSV Marker 模式")
+    csv_marker_mode_label.grid(row=row, column=0, sticky="w", pady=4)
+    csv_marker_mode_var = tk.StringVar(value=str(defaults.get("csv_marker_mode", "legacy")))
+    csv_marker_mode_combo = ttk.Combobox(
+        main_frame, textvariable=csv_marker_mode_var,
+        values=["legacy", "detailed"], state="readonly", width=10,
+    )
+    csv_marker_mode_combo.grid(row=row, column=1, sticky="w", pady=4, padx=(10, 0))
+    csv_marker_mode_hint = ttk.Label(main_frame, text="(legacy: 0/1/2, detailed: 实际值)")
+    csv_marker_mode_hint.grid(row=row, column=2, sticky="w", pady=4, padx=(5, 0))
+    row += 1
+
+    # Widgets to toggle based on recording format
+    _csv_marker_widgets = [csv_marker_mode_label, csv_marker_mode_combo, csv_marker_mode_hint]
+
+    def _toggle_csv_marker_mode(*_args: Any) -> None:
+        show = recording_format_var.get() in ("csv", "both")
+        for w in _csv_marker_widgets:
+            if show:
+                w.grid()
+            else:
+                w.grid_remove()
+
+    recording_format_var.trace_add("write", _toggle_csv_marker_mode)
+    _toggle_csv_marker_mode()  # Set initial state
 
     # ── Text fields ──
     fields: list[tuple[str, str, str]] = [
@@ -4982,6 +5385,8 @@ def show_session_dialog(args: argparse.Namespace,
 
     def on_ok() -> None:
         result["study_root"] = study_root_var.get().strip().replace("\\", "/")
+        result["recording_format"] = recording_format_var.get()
+        result["csv_marker_mode"] = csv_marker_mode_var.get()
         result["participant"] = entries["participant"].get().strip()
         result["session"] = entries["session"].get().strip()
         try:
@@ -5171,6 +5576,8 @@ def show_session_dialog(args: argparse.Namespace,
     args.class_mode = result["class_mode"]
     args.display_index = result["display_index"]
     args.study_root = result["study_root"]
+    args.recording_format = result.get("recording_format", "xdf")
+    args.csv_marker_mode = result.get("csv_marker_mode", "legacy")
     args.refresh_rate = result["refresh_rate"]
     args.fullscreen = result.get("fullscreen", True)
     if "blocks" in result:
