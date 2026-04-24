@@ -128,6 +128,14 @@ def run_classifier(config: ClassifierConfig) -> None:
                     publisher.publish(result)
                     feedback.push_result(result)
 
+                    # Log per-window classification for real-time console output
+                    logger.info(
+                        f"[Trial {tracker.trial_id}] window: "
+                        f"label={result.label} conf={result.confidence:.3f} "
+                        f"(cca={result.cca_label}/{result.cca_score:.3f} "
+                        f"mi={result.mi_label}/{result.mi_score:.3f})"
+                    )
+
                     last_classify_time = now
 
             # 3d. Short sleep to avoid busy-waiting
@@ -150,7 +158,8 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=30.0, help="LSL connection timeout (seconds)")
     parser.add_argument("--window-size-s", type=float, default=1.0, help="Classification window size (seconds)")
     parser.add_argument("--stride-s", type=float, default=0.25, help="Sliding window stride (seconds)")
-    parser.add_argument("--confidence-threshold", type=float, default=0.6, help="Confidence threshold")
+    parser.add_argument("--confidence-threshold", type=float, default=0.15, help="Confidence threshold")
+    parser.add_argument("--both-sides", action="store_true", help="Enable both-sides flicker mode")
     parser.add_argument("--output-dir", type=str, default="logs", help="Decision log output directory")
     parser.add_argument("--run-name", type=str, default="", help="Run name for logging")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
@@ -177,6 +186,7 @@ def main() -> int:
         confidence_threshold=args.confidence_threshold,
         log_output_dir=args.output_dir,
         run_name=run_name,
+        ssvep_both_sides_mode=args.both_sides,
     )
 
     # Register signal handlers for graceful shutdown
