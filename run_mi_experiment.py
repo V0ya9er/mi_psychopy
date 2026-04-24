@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import random
 import signal
 import socket
 import struct
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -16,6 +18,8 @@ from dataclasses import asdict, dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Sequence
+
+_rt_logger = logging.getLogger(__name__)
 
 import yaml
 
@@ -306,6 +310,122 @@ class LabRecorderCLIController:
             f"(no stderr output)"
         )
         return (False, error_msg)
+
+
+class RTClassifierManager:
+    """Manage the realtime_classifier.py subprocess."""
+
+    def __init__(self, config: ExperimentConfig) -> None:
+        self._config = config
+        self._process: subprocess.Popen | None = None
+
+    def start(self) -> None:
+        """Start the classifier subprocess."""
+        rt_cfg = self._config.ssvep_rt
+        if not rt_cfg.enabled:
+            return
+
+        cmd = [
+            sys.executable, "realtime_classifier.py",
+            "--timeout", "30",
+            "--window-size-s", str(rt_cfg.classifier_window_s),
+            "--stride-s", str(rt_cfg.classifier_stride_s),
+            "--confidence-threshold", str(rt_cfg.confidence_threshold),
+        ]
+        if rt_cfg.mi_checkpoint_path and rt_cfg.mi_checkpoint_path.strip():
+            cmd.extend(["--mi-checkpoint", rt_cfg.mi_checkpoint_path])
+
+        self._process = subprocess.Popen(
+            cmd,
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        )
+        _rt_logger.info("Classifier subprocess started (PID=%s)", self._process.pid)
+
+    def stop(self) -> None:
+        """Stop the classifier subprocess gracefully."""
+        if self._process is None:
+            return
+        try:
+            self._process.send_signal(
+                signal.CTRL_BREAK_EVENT if hasattr(signal, "CTRL_BREAK_EVENT") else signal.SIGTERM
+            )
+        except Exception:
+            pass
+        try:
+            self._process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self._process.kill()
+            self._process.wait(timeout=3)
+        _rt_logger.info("Classifier subprocess stopped.")
+        self._process = None
+
+    @property
+    def is_running(self) -> bool:
+        if self._process is None:
+            return False
+        return self._process.poll() is None
+
+
+class ClassificationFeedbackDisplay:
+    """Non-blocking LSL inlet for displaying classification feedback."""
+
+    def __init__(self) -> None:
+        self._inlet = None
+        self._connected = False
+        self._last_label: str = ""
+        self._last_confidence: float = 0.0
+
+    def try_connect(self, timeout: float = 0.5) -> bool:
+        """Try to connect to the classification_result LSL stream."""
+        try:
+            import pylsl as _pylsl
+            streams = _pylsl.resolve_byprop(
+                "type", "classification_result", timeout=timeout, minimum=1,
+            )
+            if not streams:
+                return False
+            self._inlet = _pylsl.StreamInlet(streams[0])
+            self._connected = True
+            return True
+        except Exception:
+            return False
+
+    def pull_result(self) -> dict | None:
+        """Non-blocking pull of latest classification result."""
+        if not self._inlet:
+            return None
+        try:
+            sample, ts = self._inlet.pull_sample(timeout=0.0)
+            if sample is not None:
+                label_int = int(sample[0])
+                return {
+                    "label": "left" if label_int == 0 else "right",
+                    "confidence": float(sample[1]),
+                }
+            return None
+        except Exception:
+            return None
+
+    def get_feedback_text(self) -> str:
+        """Get current feedback text based on latest classification."""
+        result = self.pull_result()
+        if result is not None:
+            self._last_label = result["label"]
+            self._last_confidence = result["confidence"]
+
+        if not self._last_label:
+            return ""
+        if self._last_confidence < 0.6:
+            return "检测中..."
+        if self._last_label == "left":
+            return "检测到：左手意图"
+        elif self._last_label == "right":
+            return "检测到：右手意图"
+        return ""
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
 
 
 class SessionUI:
@@ -1121,9 +1241,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--class-mode", choices=["binary", "ternary"], default="binary", help="binary=left/right / ternary=left/right/rest")
     parser.add_argument(
         "--trial-mode",
-        choices=["pure_mi", "ao_mi", "mi_ssvep", "pure_ssvep", "mi_p300", "mixed", "mi_arrow", "mi_ssvep_arousal", "mi_ssvep_serial", "mi_audio_fb"],
+        choices=["pure_mi", "ao_mi", "mi_ssvep", "pure_ssvep", "mi_p300", "mixed", "mi_arrow", "mi_ssvep_arousal", "mi_ssvep_serial", "mi_audio_fb", "mi_ssvep_rt"],
         default="pure_mi",
-        help="实验范式：pure_mi / ao_mi / mi_ssvep / mi_p300 / mixed / mi_arrow / mi_ssvep_arousal / mi_ssvep_serial / mi_audio_fb",
+        help="实验范式：pure_mi / ao_mi / mi_ssvep / mi_p300 / mixed / mi_arrow / mi_ssvep_arousal / mi_ssvep_serial / mi_audio_fb / mi_ssvep_rt",
     )
     parser.add_argument("--blocks", type=int, default=None, help="覆盖 block 数（默认 pilot=2, main=4）")
     parser.add_argument("--repeats-per-class", type=int, default=None, help="每 block 每类 trial 重复次数")
@@ -1273,6 +1393,25 @@ _YAML_TO_FLAT: dict[tuple[str, str], str] = {
     ("mi_ssvep_serial", "dim_opacity"): "ssvep_serial_dim_opacity",
     ("mi_ssvep_serial", "arrow_color"): "ssvep_serial_arrow_color",
     ("mi_ssvep_serial", "arrow_height"): "ssvep_serial_arrow_height",
+    # mi_ssvep_rt
+    ("mi_ssvep_rt", "mi_checkpoint_path"): "ssvep_rt_mi_checkpoint_path",
+    ("mi_ssvep_rt", "classifier_window_s"): "ssvep_rt_classifier_window_s",
+    ("mi_ssvep_rt", "classifier_stride_s"): "ssvep_rt_classifier_stride_s",
+    ("mi_ssvep_rt", "confidence_threshold"): "ssvep_rt_confidence_threshold",
+    ("mi_ssvep_rt", "left_freq_hz"): "ssvep_rt_left_freq_hz",
+    ("mi_ssvep_rt", "right_freq_hz"): "ssvep_rt_right_freq_hz",
+    ("mi_ssvep_rt", "flicker_duration_s"): "ssvep_rt_flicker_duration_s",
+    ("mi_ssvep_rt", "flicker_mode"): "ssvep_rt_flicker_mode",
+    ("mi_ssvep_rt", "display_mode"): "ssvep_rt_display_mode",
+    ("mi_ssvep_rt", "waveform"): "ssvep_rt_waveform",
+    ("mi_ssvep_rt", "flicker_size"): "ssvep_rt_flicker_size",
+    ("mi_ssvep_rt", "flicker_y_pos"): "ssvep_rt_flicker_y_pos",
+    ("mi_ssvep_rt", "left_x_pos"): "ssvep_rt_left_x_pos",
+    ("mi_ssvep_rt", "right_x_pos"): "ssvep_rt_right_x_pos",
+    ("mi_ssvep_rt", "bright_color"): "ssvep_rt_bright_color",
+    ("mi_ssvep_rt", "dark_color"): "ssvep_rt_dark_color",
+    ("mi_ssvep_rt", "flicker_border_width"): "ssvep_rt_flicker_border_width",
+    ("mi_ssvep_rt", "dim_opacity"): "ssvep_rt_dim_opacity",
 }
 
 # Reverse mapping: flat_key -> (yaml_section, yaml_key)
@@ -1439,6 +1578,8 @@ def get_phase_sequence_for_trial_type(trial_type: str) -> tuple[str, ...]:
         return ("fixation", "arousal_cue", "arousal_task", "iti")
     if trial_type == "mi_ssvep_serial":
         return ("fixation", "serial_ssvep_cue", "serial_gap", "serial_mi", "iti")
+    if trial_type == "mi_ssvep_rt":
+        return ("fixation", "cue", "mi_ssvep_rt", "iti")
     return ("fixation", "cue", "ao_prime", "ao_mi", "mi_only", "iti")
 
 
@@ -1507,7 +1648,7 @@ def build_config(args: argparse.Namespace) -> ExperimentConfig:
     c = resolve_config(args, base_dict)
 
     # --- Validation ---
-    if c["trial_mode"] in ("ao_mi", "mixed", "mi_ssvep", "pure_ssvep", "mi_p300", "mi_arrow", "mi_ssvep_arousal", "mi_ssvep_serial") and c["class_mode"] != "binary":
+    if c["trial_mode"] in ("ao_mi", "mixed", "mi_ssvep", "pure_ssvep", "mi_p300", "mi_arrow", "mi_ssvep_arousal", "mi_ssvep_serial", "mi_ssvep_rt") and c["class_mode"] != "binary":
         raise SystemExit("AO+MI / MI+SSVEP / MI+P300 / MI-Arrow / SSVEP Arousal / Serial SSVEP→MI 首版仅支持 binary 模式。请使用 --class-mode binary。")
     if c["refresh_rate"] <= 0:
         raise SystemExit("general.refresh_rate 必须为正数。")
@@ -1698,6 +1839,27 @@ def build_config(args: argparse.Namespace) -> ExperimentConfig:
             dim_opacity=c.get("ssvep_serial_dim_opacity", 0.0),
             arrow_color=c.get("ssvep_serial_arrow_color", "white"),
             arrow_height=c.get("ssvep_serial_arrow_height", 0.20),
+        ),
+        ssvep_rt=SSVEPRTConfig(
+            enabled=c["trial_mode"] == "mi_ssvep_rt",
+            mi_checkpoint_path=c.get("ssvep_rt_mi_checkpoint_path", ""),
+            classifier_window_s=c.get("ssvep_rt_classifier_window_s", 1.0),
+            classifier_stride_s=c.get("ssvep_rt_classifier_stride_s", 0.25),
+            confidence_threshold=c.get("ssvep_rt_confidence_threshold", 0.6),
+            left_freq_hz=c.get("ssvep_rt_left_freq_hz", 10.0),
+            right_freq_hz=c.get("ssvep_rt_right_freq_hz", 15.0),
+            flicker_duration_s=c.get("ssvep_rt_flicker_duration_s", 4.5),
+            flicker_mode=c.get("ssvep_rt_flicker_mode", "border"),
+            display_mode=c.get("ssvep_rt_display_mode", "single_side"),
+            waveform=c.get("ssvep_rt_waveform", "square"),
+            flicker_size=tuple(c.get("ssvep_rt_flicker_size", [0.34, 0.34])),
+            flicker_y_pos=c.get("ssvep_rt_flicker_y_pos", 0.0),
+            left_x_pos=c.get("ssvep_rt_left_x_pos", -0.35),
+            right_x_pos=c.get("ssvep_rt_right_x_pos", 0.35),
+            bright_color=c.get("ssvep_rt_bright_color", "white"),
+            dark_color=c.get("ssvep_rt_dark_color", "black"),
+            flicker_border_width=c.get("ssvep_rt_flicker_border_width", 4.0),
+            dim_opacity=c.get("ssvep_rt_dim_opacity", 0.0),
         ),
         network=NetworkConfig(
             udp_ip=c["udp_ip"],
@@ -1901,7 +2063,7 @@ def build_blocks(config: ExperimentConfig) -> list[list[Trial]]:
 
         block_trials: list[Trial] = []
         for trial_index_in_block, (trial_type, condition) in enumerate(trial_specs, start=1):
-            ssvep_target_side = condition if trial_type in ("mi_ssvep", "pure_ssvep", "mi_ssvep_serial") else ""
+            ssvep_target_side = condition if trial_type in ("mi_ssvep", "pure_ssvep", "mi_ssvep_serial", "mi_ssvep_rt") else ""
             p300_target_side = condition if trial_type == "mi_p300" else ""
             # Compute ssvep_arousal_freq_hz
             ssvep_arousal_freq_hz = 0.0
@@ -1920,7 +2082,11 @@ def build_blocks(config: ExperimentConfig) -> list[list[Trial]]:
                     trial_type=trial_type,
                     phase_sequence=get_phase_sequence_for_trial_type(trial_type),
                     ssvep_target_side=ssvep_target_side,
-                    ssvep_target_freq_hz=get_ssvep_target_freq(config, condition) if trial_type in ("mi_ssvep", "pure_ssvep") else 0.0,
+                    ssvep_target_freq_hz=(
+                        get_ssvep_target_freq(config, condition) if trial_type in ("mi_ssvep", "pure_ssvep")
+                        else (config.ssvep_rt.left_freq_hz if condition == "left" else config.ssvep_rt.right_freq_hz) if trial_type == "mi_ssvep_rt"
+                        else 0.0
+                    ),
                     p300_target_side=p300_target_side,
                     ssvep_arousal_freq_hz=ssvep_arousal_freq_hz,
                 )
@@ -2555,6 +2721,73 @@ def show_ssvep_phase(
     }
 
 
+def show_ssvep_rt_phase(
+    ui: SessionUI,
+    phase: PhaseSpec,
+    rt_cfg: SSVEPRTConfig,
+    feedback_display: ClassificationFeedbackDisplay,
+    on_flip: Callable[[], None] | None = None,
+) -> dict[str, float]:
+    """SSVEP+MI phase with realtime classification feedback overlay."""
+    # Build an SSVEPConfig from SSVEPRTConfig for draw_ssvep_frame reuse
+    ssvep_for_drawing = SSVEPConfig(
+        enabled=True,
+        left_freq_hz=rt_cfg.left_freq_hz,
+        right_freq_hz=rt_cfg.right_freq_hz,
+        flicker_duration_s=rt_cfg.flicker_duration_s,
+        allow_gaze_shift=True,
+        flicker_size=rt_cfg.flicker_size,
+        flicker_y_pos=rt_cfg.flicker_y_pos,
+        left_x_pos=rt_cfg.left_x_pos,
+        right_x_pos=rt_cfg.right_x_pos,
+        flicker_mode=rt_cfg.flicker_mode,
+        display_mode=rt_cfg.display_mode,
+        waveform=rt_cfg.waveform,
+        bright_color=rt_cfg.bright_color,
+        dark_color=rt_cfg.dark_color,
+        flicker_border_width=rt_cfg.flicker_border_width,
+        dim_opacity=rt_cfg.dim_opacity,
+    )
+
+    frame_index = 0
+    timer = core.Clock()
+
+    while timer.getTime() < phase.duration_s:
+        handle_runtime_window_hotkeys(ui)
+        if "escape" in event.getKeys(keyList=["escape"]):
+            raise ExperimentAbort()
+        elapsed_time_s = timer.getTime()
+        # Draw SSVEP frame (reuse existing rendering logic)
+        ui.draw_ssvep_frame(
+            ssvep_for_drawing,
+            elapsed_time_s=elapsed_time_s,
+            title=phase.title,
+            target_side=phase.ssvep_target_side,
+            target_freq_hz=phase.ssvep_target_freq_hz,
+        )
+        # Draw classification feedback text (non-blocking)
+        feedback_text = feedback_display.get_feedback_text()
+        if feedback_text:
+            ui._draw_cached_text(
+                text=feedback_text,
+                pos=(0.0, -0.42),
+                height=0.045,
+                color="yellow",
+            )
+        if frame_index == 0 and on_flip is not None:
+            ui.win.callOnFlip(on_flip)
+        ui.win.flip()
+        frame_index += 1
+
+    elapsed_s = max(timer.getTime(), 1e-6)
+    return {
+        "rendered_frames": float(frame_index),
+        "elapsed_s": float(elapsed_s),
+        "left_hz": float(rt_cfg.left_freq_hz),
+        "right_hz": float(rt_cfg.right_freq_hz),
+    }
+
+
 
 def show_dual_cue_phase(
     ui: SessionUI,
@@ -2932,6 +3165,53 @@ def build_trial_phases(trial: Trial, config: ExperimentConfig) -> list[PhaseSpec
                 ssvep_arousal_freq_hz=trial.ssvep_arousal_freq_hz,
             ),
         ]
+    elif trial.trial_type == "mi_ssvep_rt":
+        # mi_ssvep_rt mirrors mi_ssvep but uses rt_ssvep markers (181/182/189)
+        # and includes classification feedback display
+        rt_cfg = config.ssvep_rt
+        phases = [
+            PhaseSpec(
+                phase_name="fixation",
+                duration_s=config.timings.fixation_s,
+                screen_kind="fixation",
+                marker_name="fixation_on",
+                marker_value=MARKERS["fixation_on"],
+                note="fixation_on",
+                ssvep_target_side=trial.ssvep_target_side,
+                ssvep_target_freq_hz=trial.ssvep_target_freq_hz,
+            ),
+            PhaseSpec(
+                phase_name="cue",
+                duration_s=config.timings.cue_s,
+                screen_kind="mi_ssvep_cue",
+                title=CONDITION_TO_CUE_TEXT[trial.condition],
+                layout="stimulus",
+                marker_name=f"cue_{trial.condition}",
+                marker_value=CONDITION_TO_CUE_MARKER[trial.condition],
+                note=f"cue_on; dual_open_hands; target={trial.ssvep_target_side}",
+                center_mode="none",
+                ssvep_target_side=trial.ssvep_target_side,
+                ssvep_target_freq_hz=trial.ssvep_target_freq_hz,
+                ssvep_left_freq_hz=rt_cfg.left_freq_hz,
+                ssvep_right_freq_hz=rt_cfg.right_freq_hz,
+            ),
+            PhaseSpec(
+                phase_name="mi_ssvep_rt",
+                duration_s=rt_cfg.flicker_duration_s,
+                screen_kind="mi_ssvep_rt",
+                title=(
+                    f"{CONDITION_TO_RT_SSVEP_TEXT[trial.condition]}\n"
+                    f"看向{trial.ssvep_target_side}侧闪烁，保持运动想象"
+                ),
+                marker_name=f"rt_ssvep_{trial.condition}",
+                marker_value=CONDITION_TO_RT_SSVEP_MARKER[trial.condition],
+                note=f"mi_ssvep_rt_on; dual_fist_flicker; gaze_target={trial.ssvep_target_side}",
+                ssvep_target_side=trial.ssvep_target_side,
+                ssvep_target_freq_hz=trial.ssvep_target_freq_hz,
+                ssvep_left_freq_hz=rt_cfg.left_freq_hz,
+                ssvep_right_freq_hz=rt_cfg.right_freq_hz,
+            ),
+        ]
     elif trial.trial_type == "mi_arrow":
         phases = [
             PhaseSpec(
@@ -3130,14 +3410,17 @@ def build_trial_phases(trial: Trial, config: ExperimentConfig) -> list[PhaseSpec
                 ]
             )
 
+    # ITI phase — use rt_task_off marker for mi_ssvep_rt paradigm
+    iti_marker_name = "rt_task_off" if trial.trial_type == "mi_ssvep_rt" else "task_off"
+    iti_marker_value = MARKERS[iti_marker_name]
     phases.append(
         PhaseSpec(
             phase_name="iti",
             duration_s=config.timings.iti_s,
             title="RELAX",
             layout="title_only",
-            marker_name="task_off",
-            marker_value=MARKERS["task_off"],
+            marker_name=iti_marker_name,
+            marker_value=iti_marker_value,
             note="inter_trial_interval",
             ssvep_target_side=trial.ssvep_target_side,
             ssvep_target_freq_hz=trial.ssvep_target_freq_hz,
@@ -3160,6 +3443,7 @@ def run_phase(
     config: ExperimentConfig,
     logger: EventLogger,
     sender: UdpMarkerSender,
+    feedback_display: ClassificationFeedbackDisplay | None = None,
 ) -> None:
     logger.log_event(
         "phase_start",
@@ -3229,6 +3513,29 @@ def run_phase(
         )
         logger.log_event(
             "ssvep_render_stats",
+            block_index=trial.block_index,
+            trial_index_in_block=trial.trial_index_in_block,
+            global_trial_index=trial.global_trial_index,
+            condition=trial.condition,
+            trial_type=trial.trial_type,
+            phase_name=phase.phase_name,
+            ssvep_target_side=trial.ssvep_target_side,
+            ssvep_target_freq_hz=trial.ssvep_target_freq_hz,
+            note=stats_note,
+        )
+        phase_end_note = f"{phase.note}; {stats_note}"
+    elif phase.screen_kind == "mi_ssvep_rt":
+        # Use feedback_display if available, otherwise create a dummy
+        fb = feedback_display if feedback_display is not None else ClassificationFeedbackDisplay()
+        stats = show_ssvep_rt_phase(ui, phase, config.ssvep_rt, fb, on_flip=on_flip)
+        stats_note = (
+            f"rendered_frames={int(stats['rendered_frames'])}; "
+            f"elapsed_s={stats['elapsed_s']:.4f}; "
+            f"left_hz={stats['left_hz']:.4f}; "
+            f"right_hz={stats['right_hz']:.4f}"
+        )
+        logger.log_event(
+            "ssvep_rt_render_stats",
             block_index=trial.block_index,
             trial_index_in_block=trial.trial_index_in_block,
             global_trial_index=trial.global_trial_index,
@@ -3339,6 +3646,7 @@ def run_trial(
     config: ExperimentConfig,
     logger: EventLogger,
     sender: UdpMarkerSender,
+    feedback_display: ClassificationFeedbackDisplay | None = None,
 ) -> None:
     logger.log_event(
         "trial_start",
@@ -3353,7 +3661,7 @@ def run_trial(
     )
 
     for phase in build_trial_phases(trial, config):
-        run_phase(ui, trial, phase, config, logger, sender)
+        run_phase(ui, trial, phase, config, logger, sender, feedback_display=feedback_display)
 
     logger.log_event(
         "trial_end",
@@ -3450,6 +3758,26 @@ def run_session(config: ExperimentConfig) -> int:
             config.stimuli.ao_video_start_s,
             config.stimuli.task_image_scale,
         )
+
+    # ── Start classifier subprocess and connect feedback display for mi_ssvep_rt ──
+    classifier_manager: RTClassifierManager | None = None
+    feedback_display: ClassificationFeedbackDisplay | None = None
+    if config.session_cfg.trial_mode == "mi_ssvep_rt":
+        classifier_manager = RTClassifierManager(config)
+        try:
+            classifier_manager.start()
+            _rt_logger.info("mi_ssvep_rt: classifier subprocess started")
+        except Exception as exc:
+            _rt_logger.warning("classifier subprocess failed to start: %s", exc)
+        feedback_display = ClassificationFeedbackDisplay()
+        try:
+            connected = feedback_display.try_connect(timeout=5.0)
+            if connected:
+                _rt_logger.info("mi_ssvep_rt: connected to classification_result LSL stream")
+            else:
+                _rt_logger.warning("mi_ssvep_rt: could not connect to classification_result LSL stream")
+        except Exception as exc:
+            _rt_logger.warning("mi_ssvep_rt: feedback display connection error: %s", exc)
 
     lr_status = f"XDF [OK] {xdf_path}" if lr.is_recording else "XDF [OFF] not recording"
 
@@ -3590,7 +3918,7 @@ def run_session(config: ExperimentConfig) -> int:
                             note="user chose to continue without recording",
                         )
                 
-                run_trial(ui, trial, config, logger, sender)
+                run_trial(ui, trial, config, logger, sender, feedback_display=feedback_display)
 
             sender.send(
                 MARKERS["block_end"],
@@ -3707,6 +4035,12 @@ def run_session(config: ExperimentConfig) -> int:
                         f"dropped={win.nDroppedFrames}"
                     ),
                 )
+        except Exception:
+            pass
+        # Ensure classifier subprocess is stopped regardless of exit path
+        try:
+            if classifier_manager is not None:
+                classifier_manager.stop()
         except Exception:
             pass
         # Ensure LabRecorderCLI is stopped regardless of exit path
@@ -4021,7 +4355,7 @@ def show_session_dialog(args: argparse.Namespace,
 
     # ── Trial mode dropdown ──
     ttk.Label(main_frame, text="实验范式 (Trial Mode)").grid(row=row, column=0, sticky="w", pady=4)
-    trial_modes = ["pure_mi", "ao_mi", "mi_ssvep", "pure_ssvep", "mi_p300", "mixed", "mi_arrow", "mi_ssvep_arousal", "mi_ssvep_serial"]
+    trial_modes = ["pure_mi", "ao_mi", "mi_ssvep", "pure_ssvep", "mi_p300", "mixed", "mi_arrow", "mi_ssvep_arousal", "mi_ssvep_serial", "mi_ssvep_rt"]
     trial_var = tk.StringVar(value=str(defaults.get("trial_mode", "pure_mi")))
     trial_combo = ttk.Combobox(main_frame, textvariable=trial_var, values=trial_modes,
                                state="readonly", width=27)
@@ -4386,11 +4720,70 @@ def show_session_dialog(args: argparse.Namespace,
     ssvep_serial_arrow_height_entry = ttk.Entry(ssvep_serial_frame, textvariable=ssvep_serial_arrow_height_var, width=8)
     ssvep_serial_arrow_height_entry.grid(row=16, column=1, sticky="w", pady=2, padx=(10, 0))
 
-    # Show/hide SSVEP/P300/SSVEP Arousal/SSVEP Serial frame based on trial_mode
-    ssvep_frame_row = row - 4  # remember the grid row for re-showing
-    p300_frame_row = row - 3
-    ssvep_arousal_frame_row = row - 2
-    ssvep_serial_frame_row = row - 1
+    # ── SSVEP RT-specific options (visible only when trial_mode == mi_ssvep_rt) ──
+    ssvep_rt_frame = ttk.LabelFrame(main_frame, text="MI+SSVEP 实时分类设置", padding=8)
+    ssvep_rt_frame.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+    row += 1
+
+    # MI checkpoint path
+    ttk.Label(ssvep_rt_frame, text="MI模型路径").grid(row=0, column=0, sticky="w", pady=2)
+    ssvep_rt_checkpoint_var = tk.StringVar(value=str(defaults.get("ssvep_rt_mi_checkpoint_path", "")))
+    ssvep_rt_checkpoint_entry = ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_checkpoint_var, width=25)
+    ssvep_rt_checkpoint_entry.grid(row=0, column=1, sticky="ew", pady=2, padx=(10, 0))
+
+    def _browse_rt_checkpoint() -> None:
+        chosen = filedialog.askopenfilename(
+            filetypes=[("PyTorch checkpoint", "*.pth"), ("All files", "*.*")],
+            initialdir=None,
+        )
+        if chosen:
+            ssvep_rt_checkpoint_var.set(chosen)
+
+    ttk.Button(ssvep_rt_frame, text="浏览...", command=_browse_rt_checkpoint).grid(
+        row=0, column=2, sticky="w", pady=2, padx=(5, 0))
+    ttk.Label(ssvep_rt_frame, text="（可选，无模型时仅用CCA）").grid(
+        row=1, column=0, columnspan=3, sticky="w", pady=0)
+
+    # Classifier window size
+    ttk.Label(ssvep_rt_frame, text="分类窗口 (s)").grid(row=2, column=0, sticky="w", pady=2)
+    ssvep_rt_window_var = tk.StringVar(value=str(defaults.get("ssvep_rt_classifier_window_s", 1.0)))
+    ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_window_var, width=8).grid(
+        row=2, column=1, sticky="w", pady=2, padx=(10, 0))
+    ttk.Label(ssvep_rt_frame, text="秒（默认1.0）").grid(row=2, column=2, sticky="w", pady=2)
+
+    # Classifier stride
+    ttk.Label(ssvep_rt_frame, text="滑动步长 (s)").grid(row=3, column=0, sticky="w", pady=2)
+    ssvep_rt_stride_var = tk.StringVar(value=str(defaults.get("ssvep_rt_classifier_stride_s", 0.25)))
+    ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_stride_var, width=8).grid(
+        row=3, column=1, sticky="w", pady=2, padx=(10, 0))
+    ttk.Label(ssvep_rt_frame, text="秒（默认0.25）").grid(row=3, column=2, sticky="w", pady=2)
+
+    # Confidence threshold
+    ttk.Label(ssvep_rt_frame, text="置信度阈值").grid(row=4, column=0, sticky="w", pady=2)
+    ssvep_rt_conf_var = tk.StringVar(value=str(defaults.get("ssvep_rt_confidence_threshold", 0.6)))
+    ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_conf_var, width=8).grid(
+        row=4, column=1, sticky="w", pady=2, padx=(10, 0))
+    ttk.Label(ssvep_rt_frame, text="（默认0.6）").grid(row=4, column=2, sticky="w", pady=2)
+
+    # SSVEP settings (reuse pattern from ssvep_frame)
+    ttk.Label(ssvep_rt_frame, text="左手频率").grid(row=5, column=0, sticky="w", pady=2)
+    ssvep_rt_left_freq_var = tk.StringVar(value=str(defaults.get("ssvep_rt_left_freq_hz", 10.0)))
+    ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_left_freq_var, width=8).grid(
+        row=5, column=1, sticky="w", pady=2, padx=(10, 0))
+    ttk.Label(ssvep_rt_frame, text="Hz").grid(row=5, column=2, sticky="w", pady=2)
+
+    ttk.Label(ssvep_rt_frame, text="右手频率").grid(row=6, column=0, sticky="w", pady=2)
+    ssvep_rt_right_freq_var = tk.StringVar(value=str(defaults.get("ssvep_rt_right_freq_hz", 15.0)))
+    ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_right_freq_var, width=8).grid(
+        row=6, column=1, sticky="w", pady=2, padx=(10, 0))
+    ttk.Label(ssvep_rt_frame, text="Hz").grid(row=6, column=2, sticky="w", pady=2)
+
+    # Show/hide SSVEP/P300/SSVEP Arousal/SSVEP Serial/SSVEP RT frame based on trial_mode
+    ssvep_frame_row = row - 5  # remember the grid row for re-showing
+    p300_frame_row = row - 4
+    ssvep_arousal_frame_row = row - 3
+    ssvep_serial_frame_row = row - 2
+    ssvep_rt_frame_row = row - 1
 
     def _on_arousal_freq_mode_change(_event: object = None) -> None:
         """Show/hide fields based on SSVEP Arousal freq mode selection."""
@@ -4460,26 +4853,37 @@ def show_session_dialog(args: argparse.Namespace,
             p300_frame.grid_forget()
             ssvep_arousal_frame.grid_forget()
             ssvep_serial_frame.grid_forget()
+            ssvep_rt_frame.grid_forget()
         elif trial_var.get() == "mi_p300":
             ssvep_frame.grid_forget()
             p300_frame.grid(row=p300_frame_row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
             ssvep_arousal_frame.grid_forget()
             ssvep_serial_frame.grid_forget()
+            ssvep_rt_frame.grid_forget()
         elif trial_var.get() == "mi_ssvep_arousal":
             ssvep_frame.grid_forget()
             p300_frame.grid_forget()
             ssvep_arousal_frame.grid(row=ssvep_arousal_frame_row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
             ssvep_serial_frame.grid_forget()
+            ssvep_rt_frame.grid_forget()
         elif trial_var.get() == "mi_ssvep_serial":
             ssvep_frame.grid_forget()
             p300_frame.grid_forget()
             ssvep_arousal_frame.grid_forget()
             ssvep_serial_frame.grid(row=ssvep_serial_frame_row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+            ssvep_rt_frame.grid_forget()
+        elif trial_var.get() == "mi_ssvep_rt":
+            ssvep_frame.grid_forget()
+            p300_frame.grid_forget()
+            ssvep_arousal_frame.grid_forget()
+            ssvep_serial_frame.grid_forget()
+            ssvep_rt_frame.grid(row=ssvep_rt_frame_row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
         else:
             ssvep_frame.grid_forget()
             p300_frame.grid_forget()
             ssvep_arousal_frame.grid_forget()
             ssvep_serial_frame.grid_forget()
+            ssvep_rt_frame.grid_forget()
 
     def _on_mode_change(_event: object = None) -> None:
         if mode_var.get() == "custom":
@@ -4495,23 +4899,33 @@ def show_session_dialog(args: argparse.Namespace,
         p300_frame.grid_forget()
         ssvep_arousal_frame.grid_forget()
         ssvep_serial_frame.grid_forget()
+        ssvep_rt_frame.grid_forget()
     elif trial_var.get() == "mi_p300":
         ssvep_frame.grid_forget()
         ssvep_arousal_frame.grid_forget()
         ssvep_serial_frame.grid_forget()
+        ssvep_rt_frame.grid_forget()
     elif trial_var.get() == "mi_ssvep_arousal":
         ssvep_frame.grid_forget()
         p300_frame.grid_forget()
         ssvep_serial_frame.grid_forget()
+        ssvep_rt_frame.grid_forget()
     elif trial_var.get() == "mi_ssvep_serial":
         ssvep_frame.grid_forget()
         p300_frame.grid_forget()
         ssvep_arousal_frame.grid_forget()
+        ssvep_rt_frame.grid_forget()
+    elif trial_var.get() == "mi_ssvep_rt":
+        ssvep_frame.grid_forget()
+        p300_frame.grid_forget()
+        ssvep_arousal_frame.grid_forget()
+        ssvep_serial_frame.grid_forget()
     else:
         ssvep_frame.grid_forget()
         p300_frame.grid_forget()
         ssvep_arousal_frame.grid_forget()
         ssvep_serial_frame.grid_forget()
+        ssvep_rt_frame.grid_forget()
 
     if mode_var.get() != "custom":
         custom_frame.grid_forget()
@@ -4652,6 +5066,28 @@ def show_session_dialog(args: argparse.Namespace,
             result["ssvep_serial_arrow_height"] = float(ssvep_serial_arrow_height_var.get().strip())
         except ValueError:
             result["ssvep_serial_arrow_height"] = 0.20
+        # SSVEP RT specific overrides (only relevant when trial_mode == mi_ssvep_rt)
+        result["ssvep_rt_mi_checkpoint_path"] = ssvep_rt_checkpoint_var.get()
+        try:
+            result["ssvep_rt_classifier_window_s"] = float(ssvep_rt_window_var.get() or "1.0")
+        except ValueError:
+            result["ssvep_rt_classifier_window_s"] = 1.0
+        try:
+            result["ssvep_rt_classifier_stride_s"] = float(ssvep_rt_stride_var.get() or "0.25")
+        except ValueError:
+            result["ssvep_rt_classifier_stride_s"] = 0.25
+        try:
+            result["ssvep_rt_confidence_threshold"] = float(ssvep_rt_conf_var.get() or "0.6")
+        except ValueError:
+            result["ssvep_rt_confidence_threshold"] = 0.6
+        try:
+            result["ssvep_rt_left_freq_hz"] = float(ssvep_rt_left_freq_var.get() or "10.0")
+        except ValueError:
+            result["ssvep_rt_left_freq_hz"] = 10.0
+        try:
+            result["ssvep_rt_right_freq_hz"] = float(ssvep_rt_right_freq_var.get() or "15.0")
+        except ValueError:
+            result["ssvep_rt_right_freq_hz"] = 15.0
         root.destroy()
 
     def on_cancel() -> None:
@@ -4768,6 +5204,19 @@ def show_session_dialog(args: argparse.Namespace,
         args.ssvep_serial_dim_opacity = result["ssvep_serial_dim_opacity"]
     if "ssvep_serial_arrow_height" in result:
         args.ssvep_serial_arrow_height = result["ssvep_serial_arrow_height"]
+    # SSVEP RT specific overrides from dialog
+    if "ssvep_rt_mi_checkpoint_path" in result:
+        args.ssvep_rt_mi_checkpoint_path = result["ssvep_rt_mi_checkpoint_path"]
+    if "ssvep_rt_classifier_window_s" in result:
+        args.ssvep_rt_classifier_window_s = result["ssvep_rt_classifier_window_s"]
+    if "ssvep_rt_classifier_stride_s" in result:
+        args.ssvep_rt_classifier_stride_s = result["ssvep_rt_classifier_stride_s"]
+    if "ssvep_rt_confidence_threshold" in result:
+        args.ssvep_rt_confidence_threshold = result["ssvep_rt_confidence_threshold"]
+    if "ssvep_rt_left_freq_hz" in result:
+        args.ssvep_rt_left_freq_hz = result["ssvep_rt_left_freq_hz"]
+    if "ssvep_rt_right_freq_hz" in result:
+        args.ssvep_rt_right_freq_hz = result["ssvep_rt_right_freq_hz"]
     return args
 
 
