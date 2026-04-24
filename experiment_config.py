@@ -147,10 +147,14 @@ class SSVEPSerialConfig:
 @dataclass(frozen=True)
 class SSVEPRTConfig:
     enabled: bool
-    mi_checkpoint_path: str = ""          # optional MI model checkpoint
-    classifier_window_s: float = 1.0      # classification window size
+    mi_checkpoint_path: str = (
+        r"D:\CSDIY\EEG\OLM\mi_benchmark\results"
+        r"\0418_eegnet_deepconvnet_shallowconvnet_mi_ssvep_branchnet_mi_ssvep_branchnet_mi_only_mi_ssvep_branchnet_ssvep_only_logreg_svm_random_forest_fbcsp_lda"
+        r"\deepconvnet\artifacts\fold_2.pth"
+    )  # default: best DeepConvNet fold (99.4% val accuracy)
+    classifier_window_s: float = 1.5      # classification window size (1.5s for robust CCA)
     classifier_stride_s: float = 0.25     # sliding window stride
-    confidence_threshold: float = 0.6     # minimum confidence for feedback
+    confidence_threshold: float = 0.15    # minimum confidence for feedback (margin-based)
     # Inherit SSVEP params from SSVEPConfig
     left_freq_hz: float = 10.0
     right_freq_hz: float = 15.0
@@ -180,7 +184,9 @@ class LabRecorderConfig:
     study_root: str
     path_template: str
     auto_record: bool = True
-    stream_queries: tuple[str, ...] = ('type="EEG"', 'type="Markers"')
+    stream_queries: tuple[str, ...] = ('name="obci_eeg1"', 'name="obci_eeg2"')
+    recording_format: str = "xdf"       # "xdf" / "csv" / "both"
+    csv_marker_mode: str = "legacy"     # "legacy" (0=other, 1=left, 2=right) / "detailed" (actual marker values)
 
 
 @dataclass(frozen=True)

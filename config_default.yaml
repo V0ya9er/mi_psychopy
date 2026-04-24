@@ -24,9 +24,11 @@ general:
   labrecorder_study_root: D:/CSDIY/EEG/datasets/customs  # XDF 文件根目录
   labrecorder_path_template: "%p/%s/%c/%b/%d/run-%n.xdf"    # XDF 路径模板（%p=被试 %s=session %c=class_mode %b=task %d=日期MMDD %n=run）
   labrecorder_auto_record: true                           # 是否自动启动 LabRecorderCLI 录制
-labrecorder_stream_queries:                             # 要录制的 LSL 流查询条件（LSL resolve predicate）
-  - 'type="EEG"'
-  - 'type="Markers"'
+  labrecorder_recording_format: xdf                       # 录制格式：xdf（仅XDF）/ csv（仅CSV）/ both（同时录制XDF和CSV）
+  labrecorder_csv_marker_mode: legacy                     # CSV marker 模式：legacy（0=其他, 1=左手, 2=右手）/ detailed（使用实际 marker 数值）
+labrecorder_stream_queries:                             # 要录制的 LSL 流查询条件（按 name 匹配，OpenBCI GUI 默认流名）
+  - 'name="obci_eeg1"'
+  - 'name="obci_eeg2"'
   - 'type="experiment_metadata"'
 
 # ── 纯 MI ─────────────────────────────────
@@ -131,10 +133,10 @@ mi_ssvep_serial:
 
 # ── 实时分类 SSVEP+MI ──────────────────────────
 mi_ssvep_rt:
-  mi_checkpoint_path: ""          # MI 模型 checkpoint 路径（空则使用内置默认）
-  classifier_window_s: 1.0        # 分类滑动窗口大小（秒）
+  mi_checkpoint_path: "D:\\CSDIY\\EEG\\OLM\\mi_benchmark\\results\\0418_eegnet_deepconvnet_shallowconvnet_mi_ssvep_branchnet_mi_ssvep_branchnet_mi_only_mi_ssvep_branchnet_ssvep_only_logreg_svm_random_forest_fbcsp_lda\\deepconvnet\\artifacts\\fold_2.pth"  # MI 模型 checkpoint 路径（默认 DeepConvNet fold_2, 99.4%）
+  classifier_window_s: 1.5        # 分类滑动窗口大小（秒，1.5s 更稳定）
   classifier_stride_s: 0.25       # 滑动窗口步长（秒）
-  confidence_threshold: 0.6       # 最低置信度阈值（低于此值不给出反馈）
+  confidence_threshold: 0.15      # 最低置信度阈值（相关系数差值，0.15+ 为检测到）
   left_freq_hz: 10.0              # 左侧闪烁频率（Hz）
   right_freq_hz: 15.0             # 右侧闪烁频率（Hz）
   flicker_duration_s: 4.5         # SSVEP+MI 任务持续时间（秒）

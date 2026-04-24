@@ -318,9 +318,25 @@ class LslCsvRecorder:
     Pulls samples from resolved LSL streams in a background thread and writes
     them to a CSV file in a format compatible with legacy recordings.
 
-    CSV format:
+    CSV format (matches legacy OpenBCI recordings):
       - Row 1: channel index header (0, 1, 2, ..., N)
-      - Subsequent rows: marker_value, ch0, ch1, ..., ch7
+      - Subsequent rows: marker_value, ch0, ch1, ..., chN-1
+
+    Marker source strategy:
+      The recorder prefers the **EEG stream with embedded marker channel**.
+      OpenBCI GUI's TimeSeriesRaw LSL stream ("obci_eeg1") typically includes
+      the marker as the first channel, yielding 9 channels (marker + 8 EEG).
+      This produces output identical to legacy CSV recordings.
+
+      If the EEG stream has the expected channel count (9 with marker), the
+      first channel is treated as the marker column and converted to legacy
+      format if needed.  No separate Marker stream is required.
+
+      If the EEG stream has exactly 8 channels (no embedded marker), the
+      recorder falls back to the separate "Markers" stream ("obci_eeg2").
+      In this mode, marker values are **held** between events: a non-zero
+      marker persists until the next non-zero marker arrives, and zero-value
+      "marker off" events from the Marker stream are ignored.
 
     Marker mode:
       - ``"legacy"``: Map markers to 0/1/2 (0=other, 1=left, 2=right) for
@@ -331,38 +347,26 @@ class LslCsvRecorder:
 
     # Mapping from detailed marker values to legacy 0/1/2
     _LEGACY_MARKER_MAP: dict[int, int] = {}
-    _LEGACY_LEFT_MARKERS: set[int] = set()
-    _LEGACY_RIGHT_MARKERS: set[int] = set()
 
     @classmethod
     def _build_legacy_map(cls) -> None:
         """Build the legacy marker mapping from markers.py MARKERS dict."""
         if cls._LEGACY_MARKER_MAP:
             return  # Already built
-        # Left-hand markers (cue + task phases) → legacy 1
-        left_keys = [k for k in MARKERS if "left" in k.lower()]
-        # Right-hand markers (cue + task phases) → legacy 2
-        right_keys = [k for k in MARKERS if "right" in k.lower()]
-        # Everything else → legacy 0
-        for k in left_keys:
-            cls._LEGACY_MARKER_MAP[MARKERS[k]] = 1
-            cls._LEGACY_LEFT_MARKERS.add(MARKERS[k])
-        for k in right_keys:
-            cls._LEGACY_MARKER_MAP[MARKERS[k]] = 2
-            cls._LEGACY_RIGHT_MARKERS.add(MARKERS[k])
+        for k in MARKERS:
+            if "left" in k.lower():
+                cls._LEGACY_MARKER_MAP[MARKERS[k]] = 1
+            elif "right" in k.lower():
+                cls._LEGACY_MARKER_MAP[MARKERS[k]] = 2
 
     def __init__(
         self,
         csv_path: str,
         marker_mode: str = "legacy",
-        eeg_query: str = 'type="EEG"',
-        marker_query: str = 'type="Markers"',
         resolve_timeout: float = 10.0,
     ) -> None:
         self._csv_path = csv_path
         self._marker_mode = marker_mode
-        self._eeg_query = eeg_query
-        self._marker_query = marker_query
         self._resolve_timeout = resolve_timeout
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -372,6 +376,14 @@ class LslCsvRecorder:
         self._writer: Any = None
         self._eeg_inlet: Any = None
         self._marker_inlet: Any = None
+        self._embedded_marker: bool = False  # True if EEG stream includes marker channel
+
+    def _convert_marker(self, raw_marker: float) -> int | float:
+        """Convert a raw marker value based on the configured marker mode."""
+        if self._marker_mode == "legacy":
+            int_marker = int(round(raw_marker))
+            return self._LEGACY_MARKER_MAP.get(int_marker, 0)
+        return raw_marker
 
     def start_recording(self) -> str:
         """Start the CSV recording thread.
@@ -387,44 +399,68 @@ class LslCsvRecorder:
 
         self._build_legacy_map()
 
-        # Resolve LSL streams
+        # ── Resolve EEG stream by name (OpenBCI GUI default: "obci_eeg1") ──
         eeg_streams = pylsl.resolve_byprop(
-            "type", "EEG", timeout=self._resolve_timeout, minimum=1,
+            "name", "obci_eeg1", timeout=self._resolve_timeout, minimum=1,
         )
-        if not eeg_streams:
-            # Try the configured query as fallback
-            try:
-                eeg_streams = pylsl.resolve_stream(
-                    self._resolve_timeout,
-                    minimum=1,
-                    **self._parse_query(self._eeg_query),
-                )
-            except Exception:
-                pass
         if not eeg_streams:
             raise RuntimeError(
-                f"无法解析 LSL EEG 流 (query={self._eeg_query!r}, "
-                f"timeout={self._resolve_timeout}s)"
+                f"无法解析 LSL EEG 流 (name=obci_eeg1, "
+                f"timeout={self._resolve_timeout}s). "
+                f"请确保 OpenBCI GUI 的 Networking Widget 已开启 LSL 输出。"
             )
 
-        marker_streams = pylsl.resolve_byprop(
-            "type", "Markers", timeout=self._resolve_timeout, minimum=1,
-        )
-
         self._eeg_inlet = pylsl.StreamInlet(eeg_streams[0], max_buflen=360)
-        self._marker_inlet = (
-            pylsl.StreamInlet(marker_streams[0], max_buflen=360)
-            if marker_streams else None
-        )
+        n_ch = self._eeg_inlet.info().channel_count()
+
+        # Detect whether the EEG stream includes an embedded marker channel.
+        # OpenBCI GUI with 8-channel board + Marker Widget → 9 channels
+        # (marker + 8 EEG).  Without Marker Widget → 8 channels.
+        #
+        # We treat the FIRST channel as the marker when channel count is
+        # exactly one more than the expected number of EEG channels (8).
+        eeg_channel_count = 8  # Expected EEG channels per README
+        if n_ch == eeg_channel_count + 1:
+            # EEG stream includes a marker channel as the first channel
+            self._embedded_marker = True
+            print(
+                f"LslCsvRecorder: EEG 流含 {n_ch} 通道（含内嵌 marker），"
+                f"将使用内嵌 marker 通道"
+            )
+        else:
+            # No embedded marker — fall back to separate Markers stream
+            self._embedded_marker = False
+            marker_streams = pylsl.resolve_byprop(
+                "name", "obci_eeg2", timeout=self._resolve_timeout, minimum=1,
+            )
+            self._marker_inlet = (
+                pylsl.StreamInlet(marker_streams[0], max_buflen=360)
+                if marker_streams else None
+            )
+            if self._marker_inlet is None:
+                print(
+                    "LslCsvRecorder: 警告 — 未找到独立 Marker 流，"
+                    "CSV 的 marker 列将始终为 0"
+                )
+            else:
+                print(
+                    f"LslCsvRecorder: EEG 流含 {n_ch} 通道（无内嵌 marker），"
+                    f"使用独立 Marker 流"
+                )
 
         # Open CSV file and write header
         csv_path = Path(self._csv_path)
         csv_path.parent.mkdir(parents=True, exist_ok=True)
-        n_ch = self._eeg_inlet.info().channel_count()
         self._file = csv_path.open("w", newline="", encoding="utf-8")
         self._writer = csv.writer(self._file)
-        # Header row: marker + channel indices
-        self._writer.writerow(list(range(n_ch + 1)))
+
+        if self._embedded_marker:
+            # With embedded marker: write all channels directly
+            # Column 0 = marker, columns 1..8 = EEG channels
+            self._writer.writerow(list(range(n_ch)))
+        else:
+            # Without embedded marker: write marker (from separate stream) + EEG
+            self._writer.writerow(list(range(n_ch + 1)))
         self._file.flush()
 
         # Start recording thread
@@ -435,49 +471,57 @@ class LslCsvRecorder:
             name="LslCsvRecorder",
         )
         self._thread.start()
+        mode_str = (
+            "embedded_marker" if self._embedded_marker
+            else "separate_marker_stream"
+        )
         print(
             f"LslCsvRecorder 已启动, CSV: {csv_path} "
-            f"(marker_mode={self._marker_mode}, channels={n_ch})"
+            f"(marker_mode={self._marker_mode}, strategy={mode_str}, channels={n_ch})"
         )
         return self._csv_path
 
-    @staticmethod
-    def _parse_query(query: str) -> dict[str, str]:
-        """Parse an LSL query string like 'type=\"EEG\"' into kwargs."""
-        import re
-        kwargs: dict[str, str] = {}
-        for match in re.finditer(r'(\w+)="([^"]+)"', query):
-            kwargs[match.group(1)] = match.group(2)
-        return kwargs
-
     def _recording_loop(self) -> None:
         """Background thread: pull LSL samples and write to CSV."""
-        marker_value = 0.0  # Current marker (held until next marker arrives)
+        # For separate marker stream: held marker value
+        # Only updated on non-zero markers; zero-value "marker off" events
+        # are ignored so the previous non-zero marker persists.
+        held_marker = 0.0
+
         try:
             while not self._stop_event.is_set():
-                # Pull marker (non-blocking)
-                if self._marker_inlet is not None:
+                # ── Pull marker from separate stream (non-embedded mode) ──
+                if not self._embedded_marker and self._marker_inlet is not None:
                     try:
                         sample, _ts = self._marker_inlet.pull_sample(timeout=0.0)
                         if sample is not None:
-                            marker_value = float(sample[0])
+                            new_marker = float(sample[0])
+                            # Only update held_marker on non-zero values.
+                            # OpenBCI GUI sends a 0-value "marker off" event
+                            # after each marker — we ignore these so the last
+                            # non-zero marker persists until the next one.
+                            if new_marker != 0.0:
+                                held_marker = new_marker
                     except Exception:
                         pass
 
-                # Pull EEG samples (small timeout to avoid busy-wait)
+                # ── Pull EEG sample ──
                 try:
                     sample, _ts = self._eeg_inlet.pull_sample(timeout=0.01)
                     if sample is not None:
-                        if self._marker_mode == "legacy":
-                            # Convert detailed marker to legacy 0/1/2
-                            int_marker = int(round(marker_value))
-                            csv_marker = self._LEGACY_MARKER_MAP.get(int_marker, 0)
+                        if self._embedded_marker:
+                            # First channel is the embedded marker
+                            raw_marker = float(sample[0])
+                            eeg_data = sample[1:]
+                            csv_marker = self._convert_marker(raw_marker)
+                            row = [csv_marker] + [float(v) for v in eeg_data]
                         else:
-                            csv_marker = marker_value
-                        row = [csv_marker] + [float(v) for v in sample]
+                            # Marker from separate stream (held value)
+                            csv_marker = self._convert_marker(held_marker)
+                            row = [csv_marker] + [float(v) for v in sample]
+
                         self._writer.writerow(row)
                         self._samples_written += 1
-                        # Flush every 256 samples to keep file up-to-date
                         if self._samples_written % 256 == 0:
                             self._file.flush()
                 except Exception:
@@ -506,11 +550,13 @@ class LslCsvRecorder:
                     sample, _ts = self._eeg_inlet.pull_sample(timeout=0.0)
                     if sample is None:
                         break
-                    # Use the last known marker
-                    csv_marker = 0
-                    if self._marker_mode == "legacy":
-                        pass  # Already 0 at drain time
-                    row = [csv_marker] + [float(v) for v in sample]
+                    if self._embedded_marker:
+                        raw_marker = float(sample[0])
+                        eeg_data = sample[1:]
+                        csv_marker = self._convert_marker(raw_marker)
+                        row = [csv_marker] + [float(v) for v in eeg_data]
+                    else:
+                        row = [0] + [float(v) for v in sample]
                     self._writer.writerow(row)
                     self._samples_written += 1
             except Exception:
@@ -571,6 +617,9 @@ class RTClassifierManager:
         ]
         if rt_cfg.mi_checkpoint_path and rt_cfg.mi_checkpoint_path.strip():
             cmd.extend(["--mi-checkpoint", rt_cfg.mi_checkpoint_path])
+        # Pass both-sides mode when display_mode is both_sides
+        if rt_cfg.display_mode == "both_sides":
+            cmd.append("--both-sides")
 
         self._process = subprocess.Popen(
             cmd,
@@ -645,6 +694,10 @@ class ClassificationFeedbackDisplay:
 
     def get_feedback_text(self) -> str:
         """Get current feedback text based on latest classification."""
+        # Retry connection if not yet connected (classifier may start late)
+        if not self._connected:
+            self.try_connect(timeout=0.1)
+
         result = self.pull_result()
         if result is not None:
             self._last_label = result["label"]
@@ -652,7 +705,8 @@ class ClassificationFeedbackDisplay:
 
         if not self._last_label:
             return ""
-        if self._last_confidence < 0.6:
+        # Margin-based confidence: 0.15+ means detected, below means uncertain
+        if self._last_confidence < 0.05:
             return "检测中..."
         if self._last_label == "left":
             return "检测到：左手意图"
@@ -2110,10 +2164,10 @@ def build_config(args: argparse.Namespace) -> ExperimentConfig:
         ),
         ssvep_rt=SSVEPRTConfig(
             enabled=c["trial_mode"] == "mi_ssvep_rt",
-            mi_checkpoint_path=c.get("ssvep_rt_mi_checkpoint_path", ""),
-            classifier_window_s=c.get("ssvep_rt_classifier_window_s", 1.0),
+            mi_checkpoint_path=c.get("ssvep_rt_mi_checkpoint_path", "") or SSVEPRTConfig.mi_checkpoint_path,
+            classifier_window_s=c.get("ssvep_rt_classifier_window_s", 1.5),
             classifier_stride_s=c.get("ssvep_rt_classifier_stride_s", 0.25),
-            confidence_threshold=c.get("ssvep_rt_confidence_threshold", 0.6),
+            confidence_threshold=c.get("ssvep_rt_confidence_threshold", 0.15),
             left_freq_hz=c.get("ssvep_rt_left_freq_hz", 10.0),
             right_freq_hz=c.get("ssvep_rt_right_freq_hz", 15.0),
             flicker_duration_s=c.get("ssvep_rt_flicker_duration_s", 4.5),
@@ -2140,7 +2194,7 @@ def build_config(args: argparse.Namespace) -> ExperimentConfig:
             study_root=c.get("labrecorder_study_root", "D:/CSDIY/EEG/datasets/customs"),
             path_template=c.get("labrecorder_path_template", "%p/%s/%c/%b/run-%n.xdf"),
             auto_record=c.get("labrecorder_auto_record", True),
-            stream_queries=tuple(c.get("labrecorder_stream_queries", ('type="EEG"', 'type="Markers"'))),
+            stream_queries=tuple(c.get("labrecorder_stream_queries", ('name="obci_eeg1"', 'name="obci_eeg2"'))),
             recording_format=c.get("labrecorder_recording_format", "xdf"),
             csv_marker_mode=c.get("labrecorder_csv_marker_mode", "legacy"),
         ),
@@ -3971,6 +4025,7 @@ def run_session(config: ExperimentConfig) -> int:
                   f"ch={info['channel_count']}, rate={info['nominal_srate']}Hz")
 
     recording_format = config.labrecorder.recording_format
+    print(f"录制格式: {recording_format} (marker_mode={config.labrecorder.csv_marker_mode})")
 
     # ── Start LabRecorderCLI for automatic XDF recording ──
     lr = LabRecorderCLIController(config.labrecorder)
@@ -4483,8 +4538,11 @@ def _detect_monitors() -> list[dict[str, Any]]:
 def _check_lsl_streams(stream_queries: Sequence[str], timeout: float = 2.0) -> dict[str, Any]:
     """Check if required LSL streams are available.
 
+    Resolves by stream NAME for fast, unambiguous matching.
+    OpenBCI GUI defaults: obci_eeg1 (EEG), obci_eeg2 (Marker).
+
     Args:
-        stream_queries: List of LSL query predicates (e.g., ['type="EEG"', 'type="Marker"'])
+        stream_queries: List of name queries (e.g., ['name="obci_eeg1"', 'name="obci_eeg2"'])
         timeout: Timeout in seconds for LSL resolve
 
     Returns:
@@ -4500,50 +4558,45 @@ def _check_lsl_streams(stream_queries: Sequence[str], timeout: float = 2.0) -> d
             "message": "pylsl 未安装，无法检测 LSL 流",
         }
 
+    import re
+
     results: list[dict[str, Any]] = []
     all_found = True
 
     try:
-        # Get all available streams once
-        all_streams = pylsl.resolve_streams(timeout)
-
         for query in stream_queries:
-            # Parse query to extract type or name
-            # Support formats: 'type="EEG"', 'name="obci_eeg1"', etc.
             found = False
             matched_info: dict[str, Any] = {}
 
-            if "type=" in query:
-                # Extract type value from query like 'type="EEG"'
-                import re
-                match = re.search(r'type="([^"]+)"', query)
-                if match:
-                    expected_type = match.group(1)
-                    for info in all_streams:
-                        if info.type() == expected_type:
-                            found = True
-                            matched_info = {
-                                "name": info.name(),
-                                "type": info.type(),
-                                "channel_count": info.channel_count(),
-                                "nominal_srate": info.nominal_srate(),
-                            }
-                            break
-            elif "name=" in query:
-                import re
+            # Parse query: support 'name="obci_eeg1"' or 'type="EEG"'
+            if "name=" in query:
                 match = re.search(r'name="([^"]+)"', query)
                 if match:
                     expected_name = match.group(1)
-                    for info in all_streams:
-                        if info.name() == expected_name:
-                            found = True
-                            matched_info = {
-                                "name": info.name(),
-                                "type": info.type(),
-                                "channel_count": info.channel_count(),
-                                "nominal_srate": info.nominal_srate(),
-                            }
-                            break
+                    streams = pylsl.resolve_byprop("name", expected_name, timeout=timeout, minimum=1)
+                    if streams:
+                        found = True
+                        info = streams[0]
+                        matched_info = {
+                            "name": info.name(),
+                            "type": info.type(),
+                            "channel_count": info.channel_count(),
+                            "nominal_srate": info.nominal_srate(),
+                        }
+            elif "type=" in query:
+                match = re.search(r'type="([^"]+)"', query)
+                if match:
+                    expected_type = match.group(1)
+                    streams = pylsl.resolve_byprop("type", expected_type, timeout=timeout, minimum=1)
+                    if streams:
+                        found = True
+                        info = streams[0]
+                        matched_info = {
+                            "name": info.name(),
+                            "type": info.type(),
+                            "channel_count": info.channel_count(),
+                            "nominal_srate": info.nominal_srate(),
+                        }
 
             if not found:
                 all_found = False
@@ -4631,10 +4684,10 @@ def _load_dialog_defaults(args: argparse.Namespace) -> dict[str, Any]:
         "ssvep_serial_border_width": flat.get("ssvep_serial_border_width", 4.0),
         "ssvep_serial_dim_opacity": flat.get("ssvep_serial_dim_opacity", 0.0),
         # SSVEP RT (mi_ssvep_rt)
-        "ssvep_rt_mi_checkpoint_path": flat.get("ssvep_rt_mi_checkpoint_path", ""),
-        "ssvep_rt_classifier_window_s": flat.get("ssvep_rt_classifier_window_s", 1.0),
+        "ssvep_rt_mi_checkpoint_path": flat.get("ssvep_rt_mi_checkpoint_path", "") or SSVEPRTConfig.mi_checkpoint_path,
+        "ssvep_rt_classifier_window_s": flat.get("ssvep_rt_classifier_window_s", 1.5),
         "ssvep_rt_classifier_stride_s": flat.get("ssvep_rt_classifier_stride_s", 0.25),
-        "ssvep_rt_confidence_threshold": flat.get("ssvep_rt_confidence_threshold", 0.6),
+        "ssvep_rt_confidence_threshold": flat.get("ssvep_rt_confidence_threshold", 0.15),
         "ssvep_rt_left_freq_hz": flat.get("ssvep_rt_left_freq_hz", 10.0),
         "ssvep_rt_right_freq_hz": flat.get("ssvep_rt_right_freq_hz", 15.0),
         "ssvep_rt_flicker_mode": flat.get("ssvep_rt_flicker_mode", "border"),
@@ -5149,7 +5202,7 @@ def show_session_dialog(args: argparse.Namespace,
 
     # MI checkpoint path
     ttk.Label(ssvep_rt_frame, text="MI模型路径").grid(row=0, column=0, sticky="w", pady=2)
-    ssvep_rt_checkpoint_var = tk.StringVar(value=str(defaults.get("ssvep_rt_mi_checkpoint_path", "")))
+    ssvep_rt_checkpoint_var = tk.StringVar(value=str(defaults.get("ssvep_rt_mi_checkpoint_path", "") or SSVEPRTConfig.mi_checkpoint_path))
     ssvep_rt_checkpoint_entry = ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_checkpoint_var, width=25)
     ssvep_rt_checkpoint_entry.grid(row=0, column=1, sticky="ew", pady=2, padx=(10, 0))
 
@@ -5168,10 +5221,10 @@ def show_session_dialog(args: argparse.Namespace,
 
     # Classifier window size
     ttk.Label(ssvep_rt_frame, text="分类窗口 (s)").grid(row=2, column=0, sticky="w", pady=2)
-    ssvep_rt_window_var = tk.StringVar(value=str(defaults.get("ssvep_rt_classifier_window_s", 1.0)))
+    ssvep_rt_window_var = tk.StringVar(value=str(defaults.get("ssvep_rt_classifier_window_s", 1.5)))
     ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_window_var, width=8).grid(
         row=2, column=1, sticky="w", pady=2, padx=(10, 0))
-    ttk.Label(ssvep_rt_frame, text="秒（默认1.0）").grid(row=2, column=2, sticky="w", pady=2)
+    ttk.Label(ssvep_rt_frame, text="秒（默认1.5）").grid(row=2, column=2, sticky="w", pady=2)
 
     # Classifier stride
     ttk.Label(ssvep_rt_frame, text="滑动步长 (s)").grid(row=3, column=0, sticky="w", pady=2)
@@ -5182,10 +5235,10 @@ def show_session_dialog(args: argparse.Namespace,
 
     # Confidence threshold
     ttk.Label(ssvep_rt_frame, text="置信度阈值").grid(row=4, column=0, sticky="w", pady=2)
-    ssvep_rt_conf_var = tk.StringVar(value=str(defaults.get("ssvep_rt_confidence_threshold", 0.6)))
+    ssvep_rt_conf_var = tk.StringVar(value=str(defaults.get("ssvep_rt_confidence_threshold", 0.15)))
     ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_conf_var, width=8).grid(
         row=4, column=1, sticky="w", pady=2, padx=(10, 0))
-    ttk.Label(ssvep_rt_frame, text="（默认0.6）").grid(row=4, column=2, sticky="w", pady=2)
+    ttk.Label(ssvep_rt_frame, text="（默认0.15，基于相关系数差值）").grid(row=4, column=2, sticky="w", pady=2)
 
     # SSVEP display settings (reuse pattern from ssvep_frame)
     ttk.Label(ssvep_rt_frame, text="闪烁模式").grid(row=5, column=0, sticky="w", pady=2)
@@ -5521,17 +5574,17 @@ def show_session_dialog(args: argparse.Namespace,
         result["ssvep_rt_waveform"] = ssvep_rt_waveform_var.get()
         result["ssvep_rt_display_mode"] = ssvep_rt_display_mode_var.get()
         try:
-            result["ssvep_rt_classifier_window_s"] = float(ssvep_rt_window_var.get() or "1.0")
+            result["ssvep_rt_classifier_window_s"] = float(ssvep_rt_window_var.get() or "1.5")
         except ValueError:
-            result["ssvep_rt_classifier_window_s"] = 1.0
+            result["ssvep_rt_classifier_window_s"] = 1.5
         try:
             result["ssvep_rt_classifier_stride_s"] = float(ssvep_rt_stride_var.get() or "0.25")
         except ValueError:
             result["ssvep_rt_classifier_stride_s"] = 0.25
         try:
-            result["ssvep_rt_confidence_threshold"] = float(ssvep_rt_conf_var.get() or "0.6")
+            result["ssvep_rt_confidence_threshold"] = float(ssvep_rt_conf_var.get() or "0.15")
         except ValueError:
-            result["ssvep_rt_confidence_threshold"] = 0.6
+            result["ssvep_rt_confidence_threshold"] = 0.15
         try:
             result["ssvep_rt_left_freq_hz"] = float(ssvep_rt_left_freq_var.get() or "10.0")
         except ValueError:
