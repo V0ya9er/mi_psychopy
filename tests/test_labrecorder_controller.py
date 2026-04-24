@@ -9,7 +9,7 @@ class LabRecorderConfig:
     study_root: str
     path_template: str
     auto_record: bool = True
-    stream_queries: tuple[str, ...] = ('type="EEG"', 'type="Markers"')
+    stream_queries: tuple[str, ...] = ('name="obci_eeg1"', 'name="obci_eeg2"')
 
 
 class LabRecorderCLIController:
