@@ -128,3 +128,24 @@ mi_ssvep_serial:
   dim_opacity: 0.0              # OFF 态 opacity
   arrow_color: white            # 箭头颜色
   arrow_height: 0.20            # 箭头高度
+
+# ── 实时分类 SSVEP+MI ──────────────────────────
+mi_ssvep_rt:
+  mi_checkpoint_path: ""          # MI 模型 checkpoint 路径（空则使用内置默认）
+  classifier_window_s: 1.0        # 分类滑动窗口大小（秒）
+  classifier_stride_s: 0.25       # 滑动窗口步长（秒）
+  confidence_threshold: 0.6       # 最低置信度阈值（低于此值不给出反馈）
+  left_freq_hz: 10.0              # 左侧闪烁频率（Hz）
+  right_freq_hz: 15.0             # 右侧闪烁频率（Hz）
+  flicker_duration_s: 4.5         # SSVEP+MI 任务持续时间（秒）
+  flicker_mode: border            # 闪烁模式：border / image
+  display_mode: single_side       # 显示模式：both_sides / single_center / single_side
+  waveform: square                # 闪烁波形：square / sine
+  flicker_size: [0.34, 0.34]      # 闪烁区域尺寸 [宽, 高]（PsychoPy height 单位）
+  flicker_y_pos: 0.0              # 闪烁区域垂直位置
+  left_x_pos: -0.35               # 左侧闪烁水平位置
+  right_x_pos: 0.35               # 右侧闪烁水平位置
+  bright_color: white             # ON 态颜色
+  dark_color: black               # OFF 态颜色
+  flicker_border_width: 4.0       # 边框宽度（border 模式）
+  dim_opacity: 0.0                # image 模式 OFF 态 opacity

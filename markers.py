@@ -43,6 +43,10 @@ MARKERS = {
     "audio_fb_cue_right": 162,
     "audio_fb_task_left": 171,
     "audio_fb_task_right": 172,
+    # 方案5: mi_ssvep_rt (实时分类 SSVEP+MI)
+    "rt_ssvep_left": 181,
+    "rt_ssvep_right": 182,
+    "rt_task_off": 189,
 }
 
 ALL_CONDITIONS = ("left", "right", "rest")
@@ -61,6 +65,7 @@ TRIAL_MODE_TO_TYPES = {
     "mi_ssvep_arousal": ("mi_ssvep_arousal",),
     "mi_ssvep_serial": ("mi_ssvep_serial",),
     "mi_audio_fb": ("mi_audio_fb",),
+    "mi_ssvep_rt": ("mi_ssvep_rt",),
 }
 TRIAL_TYPE_TO_LABEL = {
     "pure_mi": "纯 MI",
@@ -72,6 +77,7 @@ TRIAL_TYPE_TO_LABEL = {
     "mi_ssvep_arousal": "SSVEP 觉醒增强",
     "mi_ssvep_serial": "串行 SSVEP→MI",
     "mi_audio_fb": "听觉 ERD 反馈",
+    "mi_ssvep_rt": "MI+SSVEP 实时分类",
 }
 
 CONDITION_TO_CUE_MARKER = {
@@ -185,3 +191,9 @@ CONDITION_TO_AUDIO_FB_TASK_MARKER = {
     "left": MARKERS["audio_fb_task_left"],
     "right": MARKERS["audio_fb_task_right"],
 }
+
+CONDITION_TO_RT_SSVEP_MARKER = {
+    "left": MARKERS["rt_ssvep_left"],
+    "right": MARKERS["rt_ssvep_right"],
+}
+CONDITION_TO_RT_SSVEP_TEXT = CONDITION_TO_TASK_TEXT  # reuse existing task text

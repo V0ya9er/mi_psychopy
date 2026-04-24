@@ -145,6 +145,30 @@ class SSVEPSerialConfig:
 
 
 @dataclass(frozen=True)
+class SSVEPRTConfig:
+    enabled: bool
+    mi_checkpoint_path: str = ""          # optional MI model checkpoint
+    classifier_window_s: float = 1.0      # classification window size
+    classifier_stride_s: float = 0.25     # sliding window stride
+    confidence_threshold: float = 0.6     # minimum confidence for feedback
+    # Inherit SSVEP params from SSVEPConfig
+    left_freq_hz: float = 10.0
+    right_freq_hz: float = 15.0
+    flicker_duration_s: float = 4.5
+    flicker_mode: str = "border"
+    display_mode: str = "single_side"
+    waveform: str = "square"
+    flicker_size: tuple[float, float] = (0.34, 0.34)
+    flicker_y_pos: float = 0.0
+    left_x_pos: float = -0.35
+    right_x_pos: float = 0.35
+    bright_color: str = "white"
+    dark_color: str = "black"
+    flicker_border_width: float = 4.0
+    dim_opacity: float = 0.0
+
+
+@dataclass(frozen=True)
 class NetworkConfig:
     udp_ip: str
     udp_port: int
@@ -182,6 +206,7 @@ class ExperimentConfig:
     arrow: ArrowConfig
     ssvep_arousal: SSVEPArousalConfig
     ssvep_serial: SSVEPSerialConfig
+    ssvep_rt: SSVEPRTConfig
     network: NetworkConfig
     labrecorder: LabRecorderConfig
     session_cfg: SessionConfig
