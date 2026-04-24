@@ -1541,6 +1541,25 @@ def resolve_config(cli_args: argparse.Namespace, yaml_dict: dict[str, Any]) -> d
         cli_overrides["ssvep_serial_arrow_color"] = cli_args.ssvep_serial_arrow_color
     if getattr(cli_args, "ssvep_serial_arrow_height", None) is not None:
         cli_overrides["ssvep_serial_arrow_height"] = cli_args.ssvep_serial_arrow_height
+    # SSVEP RT specific overrides from session dialog or CLI
+    if getattr(cli_args, "ssvep_rt_mi_checkpoint_path", None) is not None:
+        cli_overrides["ssvep_rt_mi_checkpoint_path"] = cli_args.ssvep_rt_mi_checkpoint_path
+    if getattr(cli_args, "ssvep_rt_classifier_window_s", None) is not None:
+        cli_overrides["ssvep_rt_classifier_window_s"] = cli_args.ssvep_rt_classifier_window_s
+    if getattr(cli_args, "ssvep_rt_classifier_stride_s", None) is not None:
+        cli_overrides["ssvep_rt_classifier_stride_s"] = cli_args.ssvep_rt_classifier_stride_s
+    if getattr(cli_args, "ssvep_rt_confidence_threshold", None) is not None:
+        cli_overrides["ssvep_rt_confidence_threshold"] = cli_args.ssvep_rt_confidence_threshold
+    if getattr(cli_args, "ssvep_rt_left_freq_hz", None) is not None:
+        cli_overrides["ssvep_rt_left_freq_hz"] = cli_args.ssvep_rt_left_freq_hz
+    if getattr(cli_args, "ssvep_rt_right_freq_hz", None) is not None:
+        cli_overrides["ssvep_rt_right_freq_hz"] = cli_args.ssvep_rt_right_freq_hz
+    if getattr(cli_args, "ssvep_rt_flicker_mode", None) is not None:
+        cli_overrides["ssvep_rt_flicker_mode"] = cli_args.ssvep_rt_flicker_mode
+    if getattr(cli_args, "ssvep_rt_waveform", None) is not None:
+        cli_overrides["ssvep_rt_waveform"] = cli_args.ssvep_rt_waveform
+    if getattr(cli_args, "ssvep_rt_display_mode", None) is not None:
+        cli_overrides["ssvep_rt_display_mode"] = cli_args.ssvep_rt_display_mode
 
     merged.update(cli_overrides)
     return merged
@@ -5245,6 +5264,12 @@ def show_session_dialog(args: argparse.Namespace,
         args.ssvep_rt_left_freq_hz = result["ssvep_rt_left_freq_hz"]
     if "ssvep_rt_right_freq_hz" in result:
         args.ssvep_rt_right_freq_hz = result["ssvep_rt_right_freq_hz"]
+    if "ssvep_rt_flicker_mode" in result:
+        args.ssvep_rt_flicker_mode = result["ssvep_rt_flicker_mode"]
+    if "ssvep_rt_waveform" in result:
+        args.ssvep_rt_waveform = result["ssvep_rt_waveform"]
+    if "ssvep_rt_display_mode" in result:
+        args.ssvep_rt_display_mode = result["ssvep_rt_display_mode"]
     return args
 
 
