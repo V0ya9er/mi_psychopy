@@ -147,6 +147,7 @@ class SSVEPSerialConfig:
 @dataclass(frozen=True)
 class SSVEPRTConfig:
     enabled: bool
+    mi_enabled: bool = False           # Enable MI model fusion (default: FBCCA only)
     mi_checkpoint_path: str = (
         r"D:\CSDIY\EEG\OLM\mi_benchmark\results"
         r"\0418_eegnet_deepconvnet_shallowconvnet_mi_ssvep_branchnet_mi_ssvep_branchnet_mi_only_mi_ssvep_branchnet_ssvep_only_logreg_svm_random_forest_fbcsp_lda"

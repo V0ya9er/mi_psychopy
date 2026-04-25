@@ -155,6 +155,7 @@ def run_classifier(config: ClassifierConfig) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Real-time SSVEP+MI classifier")
     parser.add_argument("--mi-checkpoint", type=str, default="", help="Path to MI model checkpoint (.pth)")
+    parser.add_argument("--no-mi", action="store_true", help="Disable MI classification (FBCCA only)")
     parser.add_argument("--timeout", type=float, default=30.0, help="LSL connection timeout (seconds)")
     parser.add_argument("--window-size-s", type=float, default=1.0, help="Classification window size (seconds)")
     parser.add_argument("--stride-s", type=float, default=0.25, help="Sliding window stride (seconds)")
@@ -164,6 +165,9 @@ def main() -> int:
     parser.add_argument("--run-name", type=str, default="", help="Run name for logging")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
+
+    # --no-mi overrides any --mi-checkpoint to force FBCCA-only mode
+    mi_checkpoint = "" if args.no_mi else args.mi_checkpoint
 
     # Setup logging
     log_level = logging.DEBUG if args.verbose else logging.INFO
@@ -179,7 +183,7 @@ def main() -> int:
     run_name = args.run_name or f"rt_{time.strftime('%Y%m%d-%H%M%S')}"
 
     config = ClassifierConfig(
-        mi_checkpoint_path=args.mi_checkpoint,
+        mi_checkpoint_path=mi_checkpoint,
         lsl_connect_timeout_s=args.timeout,
         window_size_s=args.window_size_s,
         stride_s=args.stride_s,

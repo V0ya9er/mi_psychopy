@@ -615,8 +615,10 @@ class RTClassifierManager:
             "--stride-s", str(rt_cfg.classifier_stride_s),
             "--confidence-threshold", str(rt_cfg.confidence_threshold),
         ]
-        if rt_cfg.mi_checkpoint_path and rt_cfg.mi_checkpoint_path.strip():
+        if rt_cfg.mi_enabled and rt_cfg.mi_checkpoint_path and rt_cfg.mi_checkpoint_path.strip():
             cmd.extend(["--mi-checkpoint", rt_cfg.mi_checkpoint_path])
+        else:
+            cmd.append("--no-mi")
         # Pass both-sides mode when display_mode is both_sides
         if rt_cfg.display_mode == "both_sides":
             cmd.append("--both-sides")
@@ -653,7 +655,14 @@ class RTClassifierManager:
 
 
 class ClassificationFeedbackDisplay:
-    """Non-blocking LSL inlet for displaying classification feedback."""
+    """Non-blocking LSL inlet for displaying classification feedback.
+
+    Design: connect once before the render loop, then only do non-blocking
+    pulls inside the tight loop.  Never call ``try_connect`` (which does a
+    blocking LSL ``resolve_byprop``) from a PsychoPy draw/flip path — a
+    single 100-ms resolve inside a 16.67-ms frame budget causes a cascade
+    of dropped frames.
+    """
 
     def __init__(self) -> None:
         self._inlet = None
@@ -662,7 +671,11 @@ class ClassificationFeedbackDisplay:
         self._last_confidence: float = 0.0
 
     def try_connect(self, timeout: float = 0.5) -> bool:
-        """Try to connect to the classification_result LSL stream."""
+        """Try to connect to the classification_result LSL stream.
+
+        Call this *once* before entering the rendering loop.  Do NOT call
+        from inside a draw/flip path.
+        """
         try:
             import pylsl as _pylsl
             streams = _pylsl.resolve_byprop(
@@ -676,12 +689,22 @@ class ClassificationFeedbackDisplay:
         except Exception:
             return False
 
+    def ensure_connected(self, timeout: float = 0.1) -> None:
+        """Attempt connection once if not yet connected.
+
+        Safe to call at phase boundaries but still does a blocking LSL
+        resolve — prefer calling ``try_connect`` explicitly before the
+        tight rendering loop whenever possible.
+        """
+        if not self._connected:
+            self.try_connect(timeout=timeout)
+
     def pull_result(self) -> dict | None:
         """Non-blocking pull of latest classification result."""
         if not self._inlet:
             return None
         try:
-            sample, ts = self._inlet.pull_sample(timeout=0.0)
+            sample, _ts = self._inlet.pull_sample(timeout=0.0)
             if sample is not None:
                 label_int = int(sample[0])
                 return {
@@ -693,11 +716,7 @@ class ClassificationFeedbackDisplay:
             return None
 
     def get_feedback_text(self) -> str:
-        """Get current feedback text based on latest classification."""
-        # Retry connection if not yet connected (classifier may start late)
-        if not self._connected:
-            self.try_connect(timeout=0.1)
-
+        """Get current feedback text — **zero blocking**, safe for render loop."""
         result = self.pull_result()
         if result is not None:
             self._last_label = result["label"]
@@ -705,7 +724,6 @@ class ClassificationFeedbackDisplay:
 
         if not self._last_label:
             return ""
-        # Margin-based confidence: 0.15+ means detected, below means uncertain
         if self._last_confidence < 0.05:
             return "检测中..."
         if self._last_label == "left":
@@ -729,7 +747,9 @@ class SessionUI:
         self._image_draw_size_cache: dict[tuple[str, float], tuple[float, float]] = {}
         self._image_stim_cache: dict[tuple[str, tuple[float, float], float], visual.ImageStim] = {}
         self._rect_stim_cache: dict[tuple[tuple[float, float], tuple[float, float], float], visual.Rect] = {}
+        self._rect_param_cache: dict[tuple[tuple[float, float], tuple[float, float], float], tuple] = {}
         self._text_stim_cache: dict[tuple[tuple[float, float], float, float, bool], visual.TextStim] = {}
+        self._text_param_cache: dict[tuple[tuple[float, float], float, float, bool], tuple] = {}
         self._ao_video_pool: dict[str, visual.MovieStim] = {}
         self._ao_video_path: Path | None = None
         self._ao_video_start_s: float = 0.0
@@ -847,11 +867,21 @@ class SessionUI:
                 lineWidth=line_width,
             )
             self._rect_stim_cache[cache_key] = rect
-        rect.pos = pos
-        rect.width = size[0]
-        rect.height = size[1]
-        rect.lineColor = color
-        rect.lineWidth = line_width
+            self._rect_param_cache[cache_key] = (pos, size, color, float(line_width))
+
+        # Skip setter calls when params unchanged — avoids marking stim dirty
+        last = self._rect_param_cache.get(cache_key)
+        new_params = (pos, size, color, float(line_width))
+        if last is None or last[0] != pos:
+            rect.pos = pos
+        if last is None or last[1] != size:
+            rect.width = size[0]
+            rect.height = size[1]
+        if last is None or last[2] != color:
+            rect.lineColor = color
+        if last is None or last[3] != float(line_width):
+            rect.lineWidth = line_width
+        self._rect_param_cache[cache_key] = new_params
         rect.draw()
 
     def _draw_cached_text(
@@ -870,18 +900,28 @@ class SessionUI:
         if stim is None:
             stim = visual.TextStim(
                 self.win,
+                text=text,
                 pos=pos,
                 height=height,
                 wrapWidth=wrap_width,
                 color=color,
                 bold=bold,
+                font="Microsoft YaHei",
             )
             self._text_stim_cache[cache_key] = stim
-        stim.pos = pos
-        stim.height = height
-        stim.wrapWidth = wrap_width
-        stim.color = color
-        stim.text = text
+            self._text_param_cache[cache_key] = (pos, float(height), wrap_width, color, text)
+
+        # Skip setter calls when params unchanged — avoids marking stim dirty
+        last = self._text_param_cache.get(cache_key)
+        new_params = (pos, float(height), wrap_width, color, text)
+        if last is None or last[:4] != new_params[:4]:
+            stim.pos = pos
+            stim.height = height
+            stim.wrapWidth = wrap_width
+            stim.color = color
+        if last is None or last[4] != text:
+            stim.text = text
+        self._text_param_cache[cache_key] = new_params
         stim.draw()
 
     def draw_dual_cue_screen(
@@ -978,6 +1018,7 @@ class SessionUI:
             text="○",
             height=0.28,
             color="white",
+            font="Microsoft YaHei",
         ).draw()
 
     def draw_cue_cross(self) -> None:
@@ -1689,6 +1730,7 @@ _YAML_TO_FLAT: dict[tuple[str, str], str] = {
     ("mi_ssvep_serial", "arrow_color"): "ssvep_serial_arrow_color",
     ("mi_ssvep_serial", "arrow_height"): "ssvep_serial_arrow_height",
     # mi_ssvep_rt
+    ("mi_ssvep_rt", "mi_enabled"): "ssvep_rt_mi_enabled",
     ("mi_ssvep_rt", "mi_checkpoint_path"): "ssvep_rt_mi_checkpoint_path",
     ("mi_ssvep_rt", "classifier_window_s"): "ssvep_rt_classifier_window_s",
     ("mi_ssvep_rt", "classifier_stride_s"): "ssvep_rt_classifier_stride_s",
@@ -1841,6 +1883,8 @@ def resolve_config(cli_args: argparse.Namespace, yaml_dict: dict[str, Any]) -> d
     if getattr(cli_args, "ssvep_serial_arrow_height", None) is not None:
         cli_overrides["ssvep_serial_arrow_height"] = cli_args.ssvep_serial_arrow_height
     # SSVEP RT specific overrides from session dialog or CLI
+    if getattr(cli_args, "ssvep_rt_mi_enabled", None) is not None:
+        cli_overrides["ssvep_rt_mi_enabled"] = cli_args.ssvep_rt_mi_enabled
     if getattr(cli_args, "ssvep_rt_mi_checkpoint_path", None) is not None:
         cli_overrides["ssvep_rt_mi_checkpoint_path"] = cli_args.ssvep_rt_mi_checkpoint_path
     if getattr(cli_args, "ssvep_rt_classifier_window_s", None) is not None:
@@ -2164,6 +2208,7 @@ def build_config(args: argparse.Namespace) -> ExperimentConfig:
         ),
         ssvep_rt=SSVEPRTConfig(
             enabled=c["trial_mode"] == "mi_ssvep_rt",
+            mi_enabled=c.get("ssvep_rt_mi_enabled", False),
             mi_checkpoint_path=c.get("ssvep_rt_mi_checkpoint_path", "") or SSVEPRTConfig.mi_checkpoint_path,
             classifier_window_s=c.get("ssvep_rt_classifier_window_s", 1.5),
             classifier_stride_s=c.get("ssvep_rt_classifier_stride_s", 0.25),
@@ -2903,10 +2948,22 @@ def show_arousal_task_phase(
     timer = core.Clock()
     freq_hz = phase.ssvep_arousal_freq_hz
 
+    _ALL_KEYS = ["f11", "1", "2", "3", "escape"]
+
     while timer.getTime() < phase.duration_s:
-        handle_runtime_window_hotkeys(ui)
-        if "escape" in event.getKeys(keyList=["escape"]):
-            raise ExperimentAbort()
+        keys = event.getKeys(keyList=_ALL_KEYS)
+        if keys:
+            for key in keys:
+                if key == "escape":
+                    raise ExperimentAbort()
+                elif key == "f11":
+                    toggle_fullscreen(ui)
+                elif key in {"1", "2", "3"}:
+                    preset_index = int(key) - 1
+                    presets = ui.display.window_size_presets
+                    if 0 <= preset_index < len(presets):
+                        set_windowed_size(ui, presets[preset_index])
+
         elapsed_time_s = timer.getTime()
         ui.draw_arousal_task_frame(
             condition,
@@ -2947,10 +3004,22 @@ def show_serial_ssvep_cue_phase(
         left_freq_hz = ssvep_serial.same_freq_hz
         right_freq_hz = ssvep_serial.same_freq_hz
 
+    _ALL_KEYS = ["f11", "1", "2", "3", "escape"]
+
     while timer.getTime() < phase.duration_s:
-        handle_runtime_window_hotkeys(ui)
-        if "escape" in event.getKeys(keyList=["escape"]):
-            raise ExperimentAbort()
+        keys = event.getKeys(keyList=_ALL_KEYS)
+        if keys:
+            for key in keys:
+                if key == "escape":
+                    raise ExperimentAbort()
+                elif key == "f11":
+                    toggle_fullscreen(ui)
+                elif key in {"1", "2", "3"}:
+                    preset_index = int(key) - 1
+                    presets = ui.display.window_size_presets
+                    if 0 <= preset_index < len(presets):
+                        set_windowed_size(ui, presets[preset_index])
+
         elapsed_time_s = timer.getTime()
         ui.draw_serial_ssvep_cue_frame(
             condition,
@@ -3014,29 +3083,52 @@ def show_ssvep_phase(
     frame_index = 0
     timer = core.Clock()
 
-    while timer.getTime() < phase.duration_s:
-        handle_runtime_window_hotkeys(ui)
-        if "escape" in event.getKeys(keyList=["escape"]):
-            raise ExperimentAbort()
-        elapsed_time_s = timer.getTime()
-        ui.draw_ssvep_frame(
-            ssvep,
-            elapsed_time_s=elapsed_time_s,
-            title=phase.title,
-            target_side=phase.ssvep_target_side,
-            target_freq_hz=phase.ssvep_target_freq_hz,
-        )
-        if frame_index == 0 and on_flip is not None:
-            ui.win.callOnFlip(on_flip)
-        ui.win.flip()
-        frame_index += 1
+    _title = phase.title
+    _target_side = phase.ssvep_target_side
+    _target_freq_hz = phase.ssvep_target_freq_hz
+    _ALL_KEYS = ["f11", "1", "2", "3", "escape"]
+
+    # GC OFF + disable frame-interval tracking during tight render loop
+    import gc as _gc
+    _gc_was_enabled = _gc.isenabled()
+    if _gc_was_enabled:
+        _gc.disable()
+    _was_recording_intervals = ui.win.recordFrameIntervals
+    ui.win.recordFrameIntervals = False
+
+    try:
+        while timer.getTime() < phase.duration_s:
+            keys = event.getKeys(keyList=_ALL_KEYS)
+            if keys:
+                for key in keys:
+                    if key == "escape":
+                        raise ExperimentAbort()
+                    elif key == "f11":
+                        toggle_fullscreen(ui)
+                    elif key in {"1", "2", "3"}:
+                        preset_index = int(key) - 1
+                        presets = ui.display.window_size_presets
+                        if 0 <= preset_index < len(presets):
+                            set_windowed_size(ui, presets[preset_index])
+
+            elapsed_time_s = timer.getTime()
+            ui.draw_ssvep_frame(
+                ssvep,
+                elapsed_time_s=elapsed_time_s,
+                title=_title,
+                target_side=_target_side,
+                target_freq_hz=_target_freq_hz,
+            )
+            if frame_index == 0 and on_flip is not None:
+                ui.win.callOnFlip(on_flip)
+            ui.win.flip()
+            frame_index += 1
+    finally:
+        if _gc_was_enabled:
+            _gc.enable()
+        ui.win.recordFrameIntervals = _was_recording_intervals
 
     elapsed_s = max(timer.getTime(), 1e-6)
-
-    # With time-driven flicker the actual frequency equals the configured
-    # frequency regardless of frame rate – sin()/square-wave switching
-    # points are computed from elapsed_time, not frame_index.
-
     return {
         "rendered_frames": float(frame_index),
         "elapsed_s": float(elapsed_s),
@@ -3052,7 +3144,14 @@ def show_ssvep_rt_phase(
     feedback_display: ClassificationFeedbackDisplay,
     on_flip: Callable[[], None] | None = None,
 ) -> dict[str, float]:
-    """SSVEP+MI phase with realtime classification feedback overlay."""
+    """SSVEP+MI phase with realtime classification feedback overlay.
+
+    Render-loop design rules for stable framerate:
+    - Zero blocking calls (no LSL resolve, no disk I/O, no network)
+    - Single ``event.getKeys`` per frame (OS event-queue polling is expensive)
+    - Pre-connect feedback before entering the loop
+    - Pre-compute constant strings/layouts, no per-frame object allocation
+    """
     # Build an SSVEPConfig from SSVEPRTConfig for draw_ssvep_frame reuse
     ssvep_for_drawing = SSVEPConfig(
         enabled=True,
@@ -3073,35 +3172,77 @@ def show_ssvep_rt_phase(
         dim_opacity=rt_cfg.dim_opacity,
     )
 
+    # ── Pre-loop setup (do NOT put blocking calls inside the render loop) ──
+    feedback_display.ensure_connected(timeout=0.1)
+
+    # Pre-compute strings that are constant for this phase
+    _title = phase.title
+    _target_side = phase.ssvep_target_side
+    _target_freq_hz = phase.ssvep_target_freq_hz
+
+    # ── GC OFF during tight render loop ──
+    # Python GC can pause 10-50ms, fatal in a 16.67ms frame budget.
+    import gc as _gc
+    _gc_was_enabled = _gc.isenabled()
+    if _gc_was_enabled:
+        _gc.disable()
+
+    # ── Disable per-frame interval recording for tighter loop ──
+    _was_recording_intervals = ui.win.recordFrameIntervals
+    ui.win.recordFrameIntervals = False
+
     frame_index = 0
     timer = core.Clock()
 
-    while timer.getTime() < phase.duration_s:
-        handle_runtime_window_hotkeys(ui)
-        if "escape" in event.getKeys(keyList=["escape"]):
-            raise ExperimentAbort()
-        elapsed_time_s = timer.getTime()
-        # Draw SSVEP frame (reuse existing rendering logic)
-        ui.draw_ssvep_frame(
-            ssvep_for_drawing,
-            elapsed_time_s=elapsed_time_s,
-            title=phase.title,
-            target_side=phase.ssvep_target_side,
-            target_freq_hz=phase.ssvep_target_freq_hz,
-        )
-        # Draw classification feedback text (non-blocking)
-        feedback_text = feedback_display.get_feedback_text()
-        if feedback_text:
-            ui._draw_cached_text(
-                text=feedback_text,
-                pos=(0.0, -0.42),
-                height=0.045,
-                color="yellow",
+    # Single combined key-list: hotkeys + escape in ONE OS poll
+    _ALL_KEYS = ["f11", "1", "2", "3", "escape"]
+
+    try:
+        while timer.getTime() < phase.duration_s:
+            # ── One event-poll per frame (was two) ──
+            keys = event.getKeys(keyList=_ALL_KEYS)
+            if keys:
+                for key in keys:
+                    if key == "escape":
+                        raise ExperimentAbort()
+                    elif key == "f11":
+                        toggle_fullscreen(ui)
+                    elif key in {"1", "2", "3"}:
+                        preset_index = int(key) - 1
+                        presets = ui.display.window_size_presets
+                        if 0 <= preset_index < len(presets):
+                            set_windowed_size(ui, presets[preset_index])
+
+            elapsed_time_s = timer.getTime()
+
+            # Draw SSVEP frame (reuse existing rendering logic)
+            ui.draw_ssvep_frame(
+                ssvep_for_drawing,
+                elapsed_time_s=elapsed_time_s,
+                title=_title,
+                target_side=_target_side,
+                target_freq_hz=_target_freq_hz,
             )
-        if frame_index == 0 and on_flip is not None:
-            ui.win.callOnFlip(on_flip)
-        ui.win.flip()
-        frame_index += 1
+
+            # Draw classification feedback text (non-blocking pull only)
+            feedback_text = feedback_display.get_feedback_text()
+            if feedback_text:
+                ui._draw_cached_text(
+                    text=feedback_text,
+                    pos=(0.0, -0.42),
+                    height=0.045,
+                    color="yellow",
+                )
+
+            if frame_index == 0 and on_flip is not None:
+                ui.win.callOnFlip(on_flip)
+            ui.win.flip()
+            frame_index += 1
+
+    finally:
+        if _gc_was_enabled:
+            _gc.enable()
+        ui.win.recordFrameIntervals = _was_recording_intervals
 
     elapsed_s = max(timer.getTime(), 1e-6)
     return {
@@ -3250,10 +3391,23 @@ def show_p300_phase(
     next_flash_idx = 0
     markers_sent = 0
 
+    _title = phase.title
+    _target_side = phase.p300_target_side
+    _ALL_KEYS = ["f11", "1", "2", "3", "escape"]
+
     while timer.getTime() < phase.duration_s:
-        handle_runtime_window_hotkeys(ui)
-        if "escape" in event.getKeys(keyList=["escape"]):
-            raise ExperimentAbort()
+        keys = event.getKeys(keyList=_ALL_KEYS)
+        if keys:
+            for key in keys:
+                if key == "escape":
+                    raise ExperimentAbort()
+                elif key == "f11":
+                    toggle_fullscreen(ui)
+                elif key in {"1", "2", "3"}:
+                    preset_index = int(key) - 1
+                    presets = ui.display.window_size_presets
+                    if 0 <= preset_index < len(presets):
+                        set_windowed_size(ui, presets[preset_index])
 
         current_time = timer.getTime()
 
@@ -3287,8 +3441,8 @@ def show_p300_phase(
         ui.draw_p300_frame(
             p300,
             flashing_side=flashing_side,
-            title=phase.title,
-            target_side=phase.p300_target_side,
+            title=_title,
+            target_side=_target_side,
         )
         ui.win.flip()
         frame_index += 1
@@ -4684,6 +4838,7 @@ def _load_dialog_defaults(args: argparse.Namespace) -> dict[str, Any]:
         "ssvep_serial_border_width": flat.get("ssvep_serial_border_width", 4.0),
         "ssvep_serial_dim_opacity": flat.get("ssvep_serial_dim_opacity", 0.0),
         # SSVEP RT (mi_ssvep_rt)
+        "ssvep_rt_mi_enabled": flat.get("ssvep_rt_mi_enabled", False),
         "ssvep_rt_mi_checkpoint_path": flat.get("ssvep_rt_mi_checkpoint_path", "") or SSVEPRTConfig.mi_checkpoint_path,
         "ssvep_rt_classifier_window_s": flat.get("ssvep_rt_classifier_window_s", 1.5),
         "ssvep_rt_classifier_stride_s": flat.get("ssvep_rt_classifier_stride_s", 0.25),
@@ -5200,11 +5355,31 @@ def show_session_dialog(args: argparse.Namespace,
     ssvep_rt_frame.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
     row += 1
 
-    # MI checkpoint path
-    ttk.Label(ssvep_rt_frame, text="MI模型路径").grid(row=0, column=0, sticky="w", pady=2)
+    # MI enable checkbox
+    _rt_mi_enabled_default = str(defaults.get("ssvep_rt_mi_enabled", "False")).lower() in ("true", "1", "yes", "on")
+    ssvep_rt_mi_enabled_var = tk.BooleanVar(value=_rt_mi_enabled_default)
+
+    def _on_rt_mi_toggle() -> None:
+        if ssvep_rt_mi_enabled_var.get():
+            _rt_mi_checkpoint_frame.grid()
+        else:
+            _rt_mi_checkpoint_frame.grid_remove()
+
+    ttk.Checkbutton(
+        ssvep_rt_frame, text="启用MI模型（不勾选仅用FBCCA）",
+        variable=ssvep_rt_mi_enabled_var, command=_on_rt_mi_toggle,
+    ).grid(row=0, column=0, columnspan=3, sticky="w", pady=2)
+
+    # MI checkpoint path — hidden unless MI enabled
+    _rt_mi_checkpoint_frame = ttk.Frame(ssvep_rt_frame)
+    _rt_mi_checkpoint_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=2)
+    _rt_mi_checkpoint_frame.columnconfigure(1, weight=1)
+
+    ttk.Label(_rt_mi_checkpoint_frame, text="MI模型路径").grid(
+        row=0, column=0, sticky="w", pady=0, padx=(0, 5))
     ssvep_rt_checkpoint_var = tk.StringVar(value=str(defaults.get("ssvep_rt_mi_checkpoint_path", "") or SSVEPRTConfig.mi_checkpoint_path))
-    ssvep_rt_checkpoint_entry = ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_checkpoint_var, width=25)
-    ssvep_rt_checkpoint_entry.grid(row=0, column=1, sticky="ew", pady=2, padx=(10, 0))
+    ssvep_rt_checkpoint_entry = ttk.Entry(_rt_mi_checkpoint_frame, textvariable=ssvep_rt_checkpoint_var, width=25)
+    ssvep_rt_checkpoint_entry.grid(row=0, column=1, sticky="ew", pady=0, padx=(0, 5))
 
     def _browse_rt_checkpoint() -> None:
         chosen = filedialog.askopenfilename(
@@ -5214,69 +5389,74 @@ def show_session_dialog(args: argparse.Namespace,
         if chosen:
             ssvep_rt_checkpoint_var.set(chosen)
 
-    ttk.Button(ssvep_rt_frame, text="浏览...", command=_browse_rt_checkpoint).grid(
-        row=0, column=2, sticky="w", pady=2, padx=(5, 0))
-    ttk.Label(ssvep_rt_frame, text="（可选，无模型时仅用CCA）").grid(
-        row=1, column=0, columnspan=3, sticky="w", pady=0)
+    ttk.Button(_rt_mi_checkpoint_frame, text="浏览...", command=_browse_rt_checkpoint).grid(
+        row=0, column=2, sticky="w", pady=0)
+
+    ttk.Label(ssvep_rt_frame, text="（勾选后选择.pth模型文件；不勾选则仅用FBCCA）").grid(
+        row=2, column=0, columnspan=3, sticky="w", pady=0)
+
+    # Initial visibility based on saved default
+    if not _rt_mi_enabled_default:
+        _rt_mi_checkpoint_frame.grid_remove()
 
     # Classifier window size
-    ttk.Label(ssvep_rt_frame, text="分类窗口 (s)").grid(row=2, column=0, sticky="w", pady=2)
+    ttk.Label(ssvep_rt_frame, text="分类窗口 (s)").grid(row=3, column=0, sticky="w", pady=2)
     ssvep_rt_window_var = tk.StringVar(value=str(defaults.get("ssvep_rt_classifier_window_s", 1.5)))
     ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_window_var, width=8).grid(
-        row=2, column=1, sticky="w", pady=2, padx=(10, 0))
-    ttk.Label(ssvep_rt_frame, text="秒（默认1.5）").grid(row=2, column=2, sticky="w", pady=2)
+        row=3, column=1, sticky="w", pady=2, padx=(10, 0))
+    ttk.Label(ssvep_rt_frame, text="秒（默认1.5）").grid(row=3, column=2, sticky="w", pady=2)
 
     # Classifier stride
-    ttk.Label(ssvep_rt_frame, text="滑动步长 (s)").grid(row=3, column=0, sticky="w", pady=2)
+    ttk.Label(ssvep_rt_frame, text="滑动步长 (s)").grid(row=4, column=0, sticky="w", pady=2)
     ssvep_rt_stride_var = tk.StringVar(value=str(defaults.get("ssvep_rt_classifier_stride_s", 0.25)))
     ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_stride_var, width=8).grid(
-        row=3, column=1, sticky="w", pady=2, padx=(10, 0))
-    ttk.Label(ssvep_rt_frame, text="秒（默认0.25）").grid(row=3, column=2, sticky="w", pady=2)
+        row=4, column=1, sticky="w", pady=2, padx=(10, 0))
+    ttk.Label(ssvep_rt_frame, text="秒（默认0.25）").grid(row=4, column=2, sticky="w", pady=2)
 
     # Confidence threshold
-    ttk.Label(ssvep_rt_frame, text="置信度阈值").grid(row=4, column=0, sticky="w", pady=2)
+    ttk.Label(ssvep_rt_frame, text="置信度阈值").grid(row=5, column=0, sticky="w", pady=2)
     ssvep_rt_conf_var = tk.StringVar(value=str(defaults.get("ssvep_rt_confidence_threshold", 0.15)))
     ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_conf_var, width=8).grid(
-        row=4, column=1, sticky="w", pady=2, padx=(10, 0))
-    ttk.Label(ssvep_rt_frame, text="（默认0.15，基于相关系数差值）").grid(row=4, column=2, sticky="w", pady=2)
+        row=5, column=1, sticky="w", pady=2, padx=(10, 0))
+    ttk.Label(ssvep_rt_frame, text="（默认0.15，基于相关系数差值）").grid(row=5, column=2, sticky="w", pady=2)
 
     # SSVEP display settings (reuse pattern from ssvep_frame)
-    ttk.Label(ssvep_rt_frame, text="闪烁模式").grid(row=5, column=0, sticky="w", pady=2)
+    ttk.Label(ssvep_rt_frame, text="闪烁模式").grid(row=6, column=0, sticky="w", pady=2)
     ssvep_rt_flicker_mode_var = tk.StringVar(value=str(defaults.get("ssvep_rt_flicker_mode", "border")))
     ttk.Combobox(ssvep_rt_frame, textvariable=ssvep_rt_flicker_mode_var,
                  values=["image", "border"], state="readonly", width=10).grid(
-        row=5, column=1, sticky="w", pady=2, padx=(10, 0))
+        row=6, column=1, sticky="w", pady=2, padx=(10, 0))
     ttk.Label(ssvep_rt_frame, text="(image=图片透明度闪烁, border=边框颜色闪烁)").grid(
-        row=5, column=2, sticky="w", pady=2, padx=(5, 0))
+        row=6, column=2, sticky="w", pady=2, padx=(5, 0))
 
-    ttk.Label(ssvep_rt_frame, text="闪烁波形").grid(row=6, column=0, sticky="w", pady=2)
+    ttk.Label(ssvep_rt_frame, text="闪烁波形").grid(row=7, column=0, sticky="w", pady=2)
     ssvep_rt_waveform_var = tk.StringVar(value=str(defaults.get("ssvep_rt_waveform", "square")))
     ttk.Combobox(ssvep_rt_frame, textvariable=ssvep_rt_waveform_var,
                  values=["square", "sine"], state="readonly", width=10).grid(
-        row=6, column=1, sticky="w", pady=2, padx=(10, 0))
+        row=7, column=1, sticky="w", pady=2, padx=(10, 0))
     ttk.Label(ssvep_rt_frame, text="(square=方波更强信号, sine=正弦更舒适)").grid(
-        row=6, column=2, sticky="w", pady=2, padx=(5, 0))
+        row=7, column=2, sticky="w", pady=2, padx=(5, 0))
 
-    ttk.Label(ssvep_rt_frame, text="左手频率").grid(row=7, column=0, sticky="w", pady=2)
+    ttk.Label(ssvep_rt_frame, text="左手频率").grid(row=8, column=0, sticky="w", pady=2)
     ssvep_rt_left_freq_var = tk.StringVar(value=str(defaults.get("ssvep_rt_left_freq_hz", 10.0)))
     ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_left_freq_var, width=8).grid(
-        row=7, column=1, sticky="w", pady=2, padx=(10, 0))
-    ttk.Label(ssvep_rt_frame, text="Hz").grid(row=7, column=2, sticky="w", pady=2)
-
-    ttk.Label(ssvep_rt_frame, text="右手频率").grid(row=8, column=0, sticky="w", pady=2)
-    ssvep_rt_right_freq_var = tk.StringVar(value=str(defaults.get("ssvep_rt_right_freq_hz", 15.0)))
-    ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_right_freq_var, width=8).grid(
         row=8, column=1, sticky="w", pady=2, padx=(10, 0))
     ttk.Label(ssvep_rt_frame, text="Hz").grid(row=8, column=2, sticky="w", pady=2)
 
-    ttk.Label(ssvep_rt_frame, text="显示模式").grid(row=9, column=0, sticky="w", pady=2)
+    ttk.Label(ssvep_rt_frame, text="右手频率").grid(row=9, column=0, sticky="w", pady=2)
+    ssvep_rt_right_freq_var = tk.StringVar(value=str(defaults.get("ssvep_rt_right_freq_hz", 15.0)))
+    ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_right_freq_var, width=8).grid(
+        row=9, column=1, sticky="w", pady=2, padx=(10, 0))
+    ttk.Label(ssvep_rt_frame, text="Hz").grid(row=9, column=2, sticky="w", pady=2)
+
+    ttk.Label(ssvep_rt_frame, text="显示模式").grid(row=10, column=0, sticky="w", pady=2)
     ssvep_rt_display_mode_var = tk.StringVar(value=str(defaults.get("ssvep_rt_display_mode", "single_side")))
     ttk.Combobox(ssvep_rt_frame, textvariable=ssvep_rt_display_mode_var,
                  values=["single_side", "both_sides", "single_center"],
                  state="readonly", width=12).grid(
-        row=9, column=1, sticky="w", pady=2, padx=(10, 0))
+        row=10, column=1, sticky="w", pady=2, padx=(10, 0))
     ttk.Label(ssvep_rt_frame, text="(single_side=仅目标侧, both_sides=双侧, single_center=居中)").grid(
-        row=9, column=2, sticky="w", pady=2, padx=(5, 0))
+        row=10, column=2, sticky="w", pady=2, padx=(5, 0))
 
     # Show/hide SSVEP/P300/SSVEP Arousal/SSVEP Serial/SSVEP RT frame based on trial_mode
     ssvep_frame_row = row - 5  # remember the grid row for re-showing
@@ -5569,6 +5749,7 @@ def show_session_dialog(args: argparse.Namespace,
         except ValueError:
             result["ssvep_serial_arrow_height"] = 0.20
         # SSVEP RT specific overrides (only relevant when trial_mode == mi_ssvep_rt)
+        result["ssvep_rt_mi_enabled"] = ssvep_rt_mi_enabled_var.get()
         result["ssvep_rt_mi_checkpoint_path"] = ssvep_rt_checkpoint_var.get()
         result["ssvep_rt_flicker_mode"] = ssvep_rt_flicker_mode_var.get()
         result["ssvep_rt_waveform"] = ssvep_rt_waveform_var.get()
@@ -5712,6 +5893,8 @@ def show_session_dialog(args: argparse.Namespace,
     if "ssvep_serial_arrow_height" in result:
         args.ssvep_serial_arrow_height = result["ssvep_serial_arrow_height"]
     # SSVEP RT specific overrides from dialog
+    if "ssvep_rt_mi_enabled" in result:
+        args.ssvep_rt_mi_enabled = result["ssvep_rt_mi_enabled"]
     if "ssvep_rt_mi_checkpoint_path" in result:
         args.ssvep_rt_mi_checkpoint_path = result["ssvep_rt_mi_checkpoint_path"]
     if "ssvep_rt_classifier_window_s" in result:
