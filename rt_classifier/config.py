@@ -24,6 +24,10 @@ class ClassifierConfig:
     cca_n_harmonics: int = 2   # 2 avoids 30Hz cross-contamination between 10Hz(3rd) and 15Hz(2nd)
     confidence_threshold: float = 0.15  # margin-based confidence — much lower range than ratio-based
 
+    # Trial window limits — prevents ITI contamination from marker latency
+    max_windows_per_trial: int = 0       # 0 = unlimited; e.g. 13 for 4.5s flicker @ 0.25s stride
+    skip_initial_windows: int = 0        # drop first N windows (SSVEP lock-in delay)
+
     # SSVEP frequency mapping
     left_freq_hz: float = 10.0
     right_freq_hz: float = 15.0
@@ -55,6 +59,10 @@ class ClassifierConfig:
     # Logging
     log_output_dir: str = "logs"
     run_name: str = "rt_classifier"
+
+    # LSL Diagnostics (for debugging real-time vs offline accuracy gap)
+    enable_diag: bool = False
+    diag_output_dir: str = "diag"
 
 
 @dataclass

@@ -171,6 +171,8 @@ class SSVEPRTConfig:
     dark_color: str = "black"
     flicker_border_width: float = 4.0
     dim_opacity: float = 0.0
+    enable_diag: bool = False          # Enable LSL diagnostics (gap/jitter detection, window saving)
+    diag_dir: str = "diag"             # Diagnostic output directory
 
 
 @dataclass(frozen=True)

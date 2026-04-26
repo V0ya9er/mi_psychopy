@@ -7,6 +7,7 @@ TrialTracker: manages trial state based on marker events and computes
 from __future__ import annotations
 
 import logging
+import time
 from collections import Counter
 
 import numpy as np
@@ -86,6 +87,7 @@ class TrialTracker:
         self._condition: str = ""
         self._labels: list[str] = []
         self._confidences: list[float] = []
+        self._start_time: float = 0.0       # wall-clock time when trial started (time.time)
 
     @property
     def state(self) -> TrialState:
@@ -99,6 +101,14 @@ class TrialTracker:
     def condition(self) -> str:
         return self._condition
 
+    @property
+    def window_count(self) -> int:
+        return len(self._labels)
+
+    @property
+    def start_time(self) -> float:
+        return self._start_time
+
     def on_marker(self, marker_value: int) -> None:
         """Process a marker event."""
         if marker_value in (MARKER_SSVEP_LEFT, MARKER_RT_SSVEP_LEFT):
@@ -107,6 +117,7 @@ class TrialTracker:
             self._state = TrialState.ACTIVE
             self._labels.clear()
             self._confidences.clear()
+            self._start_time = time.time()
             logger.info(f"Trial {self._trial_id} started: condition=left (marker={marker_value})")
         elif marker_value in (MARKER_SSVEP_RIGHT, MARKER_RT_SSVEP_RIGHT):
             self._trial_id += 1
@@ -114,6 +125,7 @@ class TrialTracker:
             self._state = TrialState.ACTIVE
             self._labels.clear()
             self._confidences.clear()
+            self._start_time = time.time()
             logger.info(f"Trial {self._trial_id} started: condition=right (marker={marker_value})")
         elif marker_value in (MARKER_TASK_OFF, MARKER_RT_TASK_OFF):
             if self._state == TrialState.ACTIVE:
@@ -127,14 +139,49 @@ class TrialTracker:
             self._confidences.append(confidence)
 
     def get_cumulative_decision(self) -> tuple[str, float]:
-        """Get the cumulative decision for the current/last trial via majority vote."""
+        """Get the cumulative decision for the current/last trial via majority vote.
+
+        Tie-breaking: when multiple labels have the same vote count, the label with
+        the highest total confidence wins. If still tied, returns "unknown".
+        """
         if not self._labels:
             return "unknown", 0.0
+
         counter = Counter(self._labels)
-        best_label = counter.most_common(1)[0][0]
+        max_count = max(counter.values())
+
+        # Find all labels that tie for the max count
+        tied_labels = [label for label, count in counter.items() if count == max_count]
+
+        if len(tied_labels) == 1:
+            best_label = tied_labels[0]
+        else:
+            # Tie-break by total confidence
+            conf_by_label: dict[str, float] = {}
+            for label, conf in zip(self._labels, self._confidences):
+                conf_by_label[label] = conf_by_label.get(label, 0.0) + conf
+
+            # Compare total confidences among tied labels
+            tied_with_conf = [(label, conf_by_label[label]) for label in tied_labels]
+            tied_with_conf.sort(key=lambda x: x[1], reverse=True)
+
+            if tied_with_conf[0][1] > tied_with_conf[1][1]:
+                best_label = tied_with_conf[0][0]
+            else:
+                # Still tied (identical total confidence) → unknown
+                logger.info(
+                    f"Trial {self._trial_id} vote: labels={self._labels} "
+                    f"counts={dict(counter)} → unknown (tie)"
+                )
+                return "unknown", 0.0
+
         # Average confidence for the winning label
         winning_confs = [c for label, c in zip(self._labels, self._confidences) if label == best_label]
         avg_conf = sum(winning_confs) / len(winning_confs) if winning_confs else 0.0
+        logger.info(
+            f"Trial {self._trial_id} vote: labels={self._labels} "
+            f"counts={dict(counter)} → {best_label}"
+        )
         return best_label, avg_conf
 
     def reset(self) -> None:

@@ -35,8 +35,7 @@ from experiment_config import *
 
 
 
-
-
+# 事件日志记录器 —— 将实验事件以 CSV 格式持久化到磁盘
 class EventLogger:
     def __init__(self, output_path: Path, config: ExperimentConfig) -> None:
         self.output_path = output_path
@@ -112,8 +111,9 @@ class EventLogger:
         self.file.close()
 
 
+# UDP marker 发送器 —— 以 big-endian float 格式发送 marker 到 OpenBCI GUI
 class UdpMarkerSender:
-    """Send big-endian 32-bit floats to match OpenBCI GUI Marker UDP input."""
+    """以 big-endian 32 位浮点格式发送 marker，兼容 OpenBCI GUI 的 Marker UDP 输入。"""
 
     def __init__(self, network: NetworkConfig, logger: EventLogger) -> None:
         self.address = (network.udp_ip, network.udp_port)
@@ -156,15 +156,16 @@ class UdpMarkerSender:
         self.sock.close()
 
 
+# LabRecorderCLI 子进程管理器 —— 后台启动/停止 XDF 录制
 class LabRecorderCLIController:
-    """Manage LabRecorderCLI as a background subprocess for XDF recording.
+    """管理 LabRecorderCLI 作为后台子进程进行 XDF 录制。
 
-    LabRecorderCLI usage::
+    LabRecorderCLI 用法::
 
-        LabRecorderCLI.exe outputfile.xdf 'searchstr' ['searchstr2' ...]
+        LabRecorderCLI.exe outputfile.xdf ''searchstr'' [''searchstr2'' ...]
 
-    The subprocess records all matching LSL streams into a single XDF file.
-    Recording continues until the process is terminated.
+    该子进程将所有匹配的 LSL 流录制到单个 XDF 文件中。
+    录制将持续到进程被终止为止。
     """
 
     def __init__(self, config: LabRecorderConfig) -> None:
@@ -175,7 +176,7 @@ class LabRecorderCLIController:
         self._stderr_thread: threading.Thread | None = None
 
     def _read_stderr(self) -> None:
-        """Background thread to read stderr from LabRecorderCLI."""
+        """后台线程，用于读取 LabRecorderCLI 的 stderr 输出。"""
         if self.process is None or self.process.stderr is None:
             return
         try:
@@ -184,15 +185,15 @@ class LabRecorderCLIController:
                 if decoded:
                     self._stderr_lines.append(decoded)
         except Exception:
-            pass  # Process terminated, pipe closed
+            pass  # 进程已终止，管道已关闭
 
     def get_stderr_log(self) -> str:
-        """Return accumulated stderr output from LabRecorderCLI."""
+        """返回 LabRecorderCLI 累积的 stderr 输出。"""
         return "\n".join(self._stderr_lines)
 
     def resolve_xdf_path(self, participant: str, session: str,
                          run: int, task: str, class_mode: str = "binary") -> str:
-        """Resolve full XDF path from template + session variables."""
+        """从模板 + session 变量解析完整的 XDF 路径。"""
         from datetime import datetime
         
         path = self.config.path_template
@@ -201,10 +202,10 @@ class LabRecorderCLIController:
         path = path.replace("%c", class_mode)
         path = path.replace("%b", task)
         path = path.replace("%n", str(run))
-        # Add date placeholder: %d = MMDD (e.g., 0417 for April 17)
+        # 添加日期占位符：%d = MMDD（例如 0417 表示 4 月 17 日）
         path = path.replace("%d", datetime.now().strftime("%m%d"))
-        # Use string concatenation to preserve forward slashes on Windows,
-        # since Path() would convert them to backslashes.
+        # 使用字符串拼接以在 Windows 上保留正斜杠，
+        # 因为 Path() 会将其转换为反斜杠。
         study_root = self.config.study_root.rstrip("/")
         full_path = f"{study_root}/{path}"
         self._xdf_path = full_path
@@ -212,14 +213,14 @@ class LabRecorderCLIController:
 
     def start_recording(self, participant: str, session: str,
                         run: int, task: str, class_mode: str = "binary") -> str:
-        """Start LabRecorderCLI as a background process.
+        """启动 LabRecorderCLI 作为后台进程。
 
-        Returns the XDF file path.  Raises ``FileNotFoundError`` if the
-        CLI executable does not exist.
+        返回 XDF 文件路径。如果 CLI 可执行文件不存在则抛出
+        ``FileNotFoundError``。
         """
         xdf_path = self.resolve_xdf_path(participant, session, run, task, class_mode)
 
-        # Ensure output directory exists
+        # 确保输出目录存在
         Path(xdf_path).parent.mkdir(parents=True, exist_ok=True)
 
         if not self.config.cli_path.exists():
@@ -236,7 +237,7 @@ class LabRecorderCLIController:
             stderr=subprocess.PIPE,
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
-        # Start background thread to capture stderr
+        # 启动后台线程捕获 stderr
         self._stderr_lines = []
         self._stderr_thread = threading.Thread(
             target=self._read_stderr,
@@ -251,11 +252,11 @@ class LabRecorderCLIController:
         return xdf_path
 
     def stop_recording(self) -> None:
-        """Stop LabRecorderCLI gracefully, then force-kill if needed."""
+        """先优雅停止 LabRecorderCLI，必要时强制终止。"""
         if self.process is None:
             return
         try:
-            # On Windows, send CTRL_BREAK_EVENT to the process group
+            # 在 Windows 上向进程组发送 CTRL_BREAK_EVENT
             if hasattr(signal, "CTRL_BREAK_EVENT"):
                 self.process.send_signal(signal.CTRL_BREAK_EVENT)
             else:
@@ -287,21 +288,21 @@ class LabRecorderCLIController:
         return self._xdf_path
 
     def check_recording_status(self) -> tuple[bool, str]:
-        """Check if recording is active and return status + error message.
+        """检查录制是否活跃，返回状态和错误信息。
         
-        Returns:
-            (is_ok, error_message): is_ok=True if recording is active,
-            False if process crashed; error_message contains stderr if crashed.
+        返回:
+            (is_ok, error_message): is_ok=True 表示录制正常，
+            False 表示进程崩溃；error_message 包含崩溃时的 stderr。
         """
         if self.process is None:
             return (False, "LabRecorderCLI was not started")
         
         poll_result = self.process.poll()
         if poll_result is None:
-            # Process still running
+            # 进程仍在运行
             return (True, "")
         
-        # Process has exited - capture stderr
+        # 进程已退出 — 捕获 stderr
         stderr_log = self.get_stderr_log()
         error_msg = (
             f"LabRecorderCLI crashed (exit code: {poll_result})\n"
@@ -312,47 +313,48 @@ class LabRecorderCLIController:
         return (False, error_msg)
 
 
+# LSL→CSV 录制器 —— 后台线程持续拉取 LSL 数据写入 CSV
 class LslCsvRecorder:
-    """Record raw EEG + marker data from LSL streams to CSV.
+    """从 LSL 流录制原始 EEG + marker 数据到 CSV。
 
-    Pulls samples from resolved LSL streams in a background thread and writes
-    them to a CSV file in a format compatible with legacy recordings.
+    在后台线程中从已解析的 LSL 流拉取样本，并以兼容旧版录制的格式
+    写入 CSV 文件。
 
-    CSV format (matches legacy OpenBCI recordings):
-      - Row 1: channel index header (0, 1, 2, ..., N)
-      - Subsequent rows: marker_value, ch0, ch1, ..., chN-1
+    CSV 格式（兼容旧版 OpenBCI 录制）:
+      - 第 1 行: 通道索引头（0, 1, 2, ..., N）
+      - 后续行: marker_value, ch0, ch1, ..., chN-1
 
-    Marker source strategy:
-      The recorder prefers the **EEG stream with embedded marker channel**.
-      OpenBCI GUI's TimeSeriesRaw LSL stream ("obci_eeg1") typically includes
-      the marker as the first channel, yielding 9 channels (marker + 8 EEG).
-      This produces output identical to legacy CSV recordings.
+    Marker 来源策略:
+      录制器优先使用嵌有 marker 通道的 EEG 流。
+      OpenBCI GUI 的 TimeSeriesRaw LSL 流 ("obci_eeg1") 通常将
+      marker 作为第一个通道，产生 9 个通道（marker + 8 EEG）。
+      这样生成的输出与旧版 CSV 录制完全一致。
 
-      If the EEG stream has the expected channel count (9 with marker), the
-      first channel is treated as the marker column and converted to legacy
-      format if needed.  No separate Marker stream is required.
+      如果 EEG 流的通道数符合预期（含 marker 为 9 通道），则第一个
+      通道被视为 marker 列，并按需转换为旧版格式。不需要单独的
+      Marker 流。
 
-      If the EEG stream has exactly 8 channels (no embedded marker), the
-      recorder falls back to the separate "Markers" stream ("obci_eeg2").
-      In this mode, marker values are **held** between events: a non-zero
-      marker persists until the next non-zero marker arrives, and zero-value
-      "marker off" events from the Marker stream are ignored.
+      如果 EEG 流恰好有 8 个通道（无内嵌 marker），录制器会回退到
+      独立的 "Markers" 流 ("obci_eeg2")。
+      在此模式下，marker 值在事件之间保持：非零 marker 会持续
+      到下一个非零 marker 到达，而 Marker 流的零值 "marker off"
+      事件将被忽略。
 
-    Marker mode:
-      - ``"legacy"``: Map markers to 0/1/2 (0=other, 1=left, 2=right) for
-        backward compatibility with older processing pipelines.
-      - ``"detailed"``: Use the actual numeric marker values (5, 11, 12, 21,
-        22, etc.) as defined in ``markers.py``.
+    Marker 模式:
+      - "legacy": 将 marker 映射为 0/1/2（0=其他, 1=左手, 2=右手），
+        用于向后兼容旧版处理流程。
+      - "detailed": 使用 markers.py 中定义的实际数字 marker 值
+        （5, 11, 12, 21, 22 等）。
     """
 
-    # Mapping from detailed marker values to legacy 0/1/2
+    # 从详细 marker 值到旧版 0/1/2 的映射
     _LEGACY_MARKER_MAP: dict[int, int] = {}
 
     @classmethod
     def _build_legacy_map(cls) -> None:
-        """Build the legacy marker mapping from markers.py MARKERS dict."""
+        """从 markers.py 的 MARKERS 字典构建旧版 marker 映射。"""
         if cls._LEGACY_MARKER_MAP:
-            return  # Already built
+            return  # 已经构建
         for k in MARKERS:
             if "left" in k.lower():
                 cls._LEGACY_MARKER_MAP[MARKERS[k]] = 1
@@ -376,30 +378,29 @@ class LslCsvRecorder:
         self._writer: Any = None
         self._eeg_inlet: Any = None
         self._marker_inlet: Any = None
-        self._embedded_marker: bool = False  # True if EEG stream includes marker channel
+        self._embedded_marker: bool = False  # True 表示 EEG 流包含 marker 通道
 
     def _convert_marker(self, raw_marker: float) -> int | float:
-        """Convert a raw marker value based on the configured marker mode."""
+        """根据配置的 marker 模式转换原始 marker 值。"""
         if self._marker_mode == "legacy":
             int_marker = int(round(raw_marker))
             return self._LEGACY_MARKER_MAP.get(int_marker, 0)
         return raw_marker
 
     def start_recording(self) -> str:
-        """Start the CSV recording thread.
+        """启动 CSV 录制线程。
 
-        Resolves LSL streams, opens the CSV file, and starts pulling samples
-        in a background thread. Returns the CSV file path.
+        解析 LSL 流，打开 CSV 文件，并在后台线程中开始拉取样本。
+        返回 CSV 文件路径。
 
-        Raises ``RuntimeError`` if pylsl is not installed or streams cannot
-        be resolved.
+        如果 pylsl 未安装或无法解析流，则抛出 RuntimeError。
         """
         if pylsl is None:
             raise RuntimeError("pylsl 未安装，无法录制 CSV")
 
         self._build_legacy_map()
 
-        # ── Resolve EEG stream by name (OpenBCI GUI default: "obci_eeg1") ──
+        # ── 按名称解析 EEG 流（OpenBCI GUI 默认: "obci_eeg1"）──
         eeg_streams = pylsl.resolve_byprop(
             "name", "obci_eeg1", timeout=self._resolve_timeout, minimum=1,
         )
@@ -413,22 +414,22 @@ class LslCsvRecorder:
         self._eeg_inlet = pylsl.StreamInlet(eeg_streams[0], max_buflen=360)
         n_ch = self._eeg_inlet.info().channel_count()
 
-        # Detect whether the EEG stream includes an embedded marker channel.
-        # OpenBCI GUI with 8-channel board + Marker Widget → 9 channels
-        # (marker + 8 EEG).  Without Marker Widget → 8 channels.
+        # 检测 EEG 流是否包含内嵌 marker 通道。
+        # 8 通道板 + Marker Widget 的 OpenBCI GUI → 9 通道
+        # (marker + 8 EEG)。没有 Marker Widget → 8 通道。
         #
-        # We treat the FIRST channel as the marker when channel count is
-        # exactly one more than the expected number of EEG channels (8).
-        eeg_channel_count = 8  # Expected EEG channels per README
+        # 当通道数恰好比预期 EEG 通道数（8）多一个时，
+        # 我们将第一个通道视为 marker。
+        eeg_channel_count = 8  # 根据 README 期望的 EEG 通道数
         if n_ch == eeg_channel_count + 1:
-            # EEG stream includes a marker channel as the first channel
+            # EEG 流包含一个作为第一个通道的 marker 通道
             self._embedded_marker = True
             print(
                 f"LslCsvRecorder: EEG 流含 {n_ch} 通道（含内嵌 marker），"
                 f"将使用内嵌 marker 通道"
             )
         else:
-            # No embedded marker — fall back to separate Markers stream
+            # 无内嵌 marker — 回退到独立 Markers 流
             self._embedded_marker = False
             marker_streams = pylsl.resolve_byprop(
                 "name", "obci_eeg2", timeout=self._resolve_timeout, minimum=1,
@@ -448,22 +449,22 @@ class LslCsvRecorder:
                     f"使用独立 Marker 流"
                 )
 
-        # Open CSV file and write header
+        # 打开 CSV 文件并写入头部
         csv_path = Path(self._csv_path)
         csv_path.parent.mkdir(parents=True, exist_ok=True)
         self._file = csv_path.open("w", newline="", encoding="utf-8")
         self._writer = csv.writer(self._file)
 
         if self._embedded_marker:
-            # With embedded marker: write all channels directly
-            # Column 0 = marker, columns 1..8 = EEG channels
+            # 有内嵌 marker：直接写入所有通道
+            # 第 0 列 = marker，第 1..8 列 = EEG 通道
             self._writer.writerow(list(range(n_ch)))
         else:
-            # Without embedded marker: write marker (from separate stream) + EEG
+            # 无内嵌 marker：写入 marker（来自独立流）+ EEG
             self._writer.writerow(list(range(n_ch + 1)))
         self._file.flush()
 
-        # Start recording thread
+        # 启动录制线程
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._recording_loop,
@@ -482,41 +483,41 @@ class LslCsvRecorder:
         return self._csv_path
 
     def _recording_loop(self) -> None:
-        """Background thread: pull LSL samples and write to CSV."""
-        # For separate marker stream: held marker value
-        # Only updated on non-zero markers; zero-value "marker off" events
-        # are ignored so the previous non-zero marker persists.
+        """后台线程：拉取 LSL 样本并写入 CSV。"""
+        # 独立 marker 流：保持的 marker 值
+        # 仅在非零 marker 时更新；零值 marker off 事件
+        # 被忽略，这样前一个非零 marker 得以保持。
         held_marker = 0.0
 
         try:
             while not self._stop_event.is_set():
-                # ── Pull marker from separate stream (non-embedded mode) ──
+                # ── 从独立流拉取 marker（非内嵌模式）──
                 if not self._embedded_marker and self._marker_inlet is not None:
                     try:
                         sample, _ts = self._marker_inlet.pull_sample(timeout=0.0)
                         if sample is not None:
                             new_marker = float(sample[0])
-                            # Only update held_marker on non-zero values.
-                            # OpenBCI GUI sends a 0-value "marker off" event
-                            # after each marker — we ignore these so the last
-                            # non-zero marker persists until the next one.
+                            # 仅在非零值时更新 held_marker。
+                            # OpenBCI GUI 在每次 marker 之后发送一个值为 0 的
+                            # marker off 事件 — 我们忽略这些，以使最后一个
+                            # 非零 marker 一直保持到下一个到来。
                             if new_marker != 0.0:
                                 held_marker = new_marker
                     except Exception:
                         pass
 
-                # ── Pull EEG sample ──
+                # ── 拉取 EEG 样本 ──
                 try:
                     sample, _ts = self._eeg_inlet.pull_sample(timeout=0.01)
                     if sample is not None:
                         if self._embedded_marker:
-                            # First channel is the embedded marker
+                            # 第一个通道是内嵌 marker
                             raw_marker = float(sample[0])
                             eeg_data = sample[1:]
                             csv_marker = self._convert_marker(raw_marker)
                             row = [csv_marker] + [float(v) for v in eeg_data]
                         else:
-                            # Marker from separate stream (held value)
+                            # marker 来自独立流（保持值）
                             csv_marker = self._convert_marker(held_marker)
                             row = [csv_marker] + [float(v) for v in sample]
 
@@ -537,13 +538,13 @@ class LslCsvRecorder:
                     pass
 
     def stop_recording(self) -> None:
-        """Stop the recording thread and close the CSV file."""
+        """停止录制线程并关闭 CSV 文件。"""
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=5.0)
             self._thread = None
 
-        # Drain remaining EEG samples from buffer
+        # 排空 EEG 缓冲区的剩余样本
         if self._eeg_inlet is not None:
             try:
                 while True:
@@ -595,15 +596,16 @@ class LslCsvRecorder:
         return self._csv_path
 
 
+# 实时分类器子进程管理器
 class RTClassifierManager:
-    """Manage the realtime_classifier.py subprocess."""
+    """管理 realtime_classifier.py 子进程。"""
 
     def __init__(self, config: ExperimentConfig) -> None:
         self._config = config
         self._process: subprocess.Popen | None = None
 
     def start(self) -> None:
-        """Start the classifier subprocess."""
+        """启动分类器子进程。"""
         rt_cfg = self._config.ssvep_rt
         if not rt_cfg.enabled:
             return
@@ -614,14 +616,19 @@ class RTClassifierManager:
             "--window-size-s", str(rt_cfg.classifier_window_s),
             "--stride-s", str(rt_cfg.classifier_stride_s),
             "--confidence-threshold", str(rt_cfg.confidence_threshold),
+            "--max-windows", "0",       # 无限制 — 让所有窗口投票以获得稳健多数
+            "--skip-initial", "0",       # 不跳过任何窗口 — 每个窗口都计入多数投票
         ]
         if rt_cfg.mi_enabled and rt_cfg.mi_checkpoint_path and rt_cfg.mi_checkpoint_path.strip():
             cmd.extend(["--mi-checkpoint", rt_cfg.mi_checkpoint_path])
         else:
             cmd.append("--no-mi")
-        # Pass both-sides mode when display_mode is both_sides
+        # display_mode 为 both_sides 时传递双面模式参数
         if rt_cfg.display_mode == "both_sides":
             cmd.append("--both-sides")
+        # LSL diagnostics
+        if rt_cfg.enable_diag:
+            cmd.extend(["--diag", "--diag-dir", rt_cfg.diag_dir])
 
         self._process = subprocess.Popen(
             cmd,
@@ -630,7 +637,7 @@ class RTClassifierManager:
         _rt_logger.info("Classifier subprocess started (PID=%s)", self._process.pid)
 
     def stop(self) -> None:
-        """Stop the classifier subprocess gracefully."""
+        """优雅停止分类器子进程。"""
         if self._process is None:
             return
         try:
@@ -654,14 +661,14 @@ class RTClassifierManager:
         return self._process.poll() is None
 
 
+# 分类反馈显示 —— 非阻塞 LSL inlet
 class ClassificationFeedbackDisplay:
-    """Non-blocking LSL inlet for displaying classification feedback.
+    """分类反馈显示的非阻塞 LSL inlet。
 
-    Design: connect once before the render loop, then only do non-blocking
-    pulls inside the tight loop.  Never call ``try_connect`` (which does a
-    blocking LSL ``resolve_byprop``) from a PsychoPy draw/flip path — a
-    single 100-ms resolve inside a 16.67-ms frame budget causes a cascade
-    of dropped frames.
+    设计：在渲染循环之前连接一次，然后在紧密循环中仅做非阻塞拉取。
+    绝不要在 PsychoPy 的 draw/flip 路径中调用 try_connect
+    （它会做阻塞 LSL resolve_byprop）—— 单次 100ms 的解析
+    在 16.67ms 的帧预算内会导致级联丢帧。
     """
 
     def __init__(self) -> None:
@@ -671,10 +678,9 @@ class ClassificationFeedbackDisplay:
         self._last_confidence: float = 0.0
 
     def try_connect(self, timeout: float = 0.5) -> bool:
-        """Try to connect to the classification_result LSL stream.
+        """尝试连接到 classification_result LSL 流。
 
-        Call this *once* before entering the rendering loop.  Do NOT call
-        from inside a draw/flip path.
+        在进入渲染循环之前调用一次。不要从 draw/flip 路径中调用。
         """
         try:
             import pylsl as _pylsl
@@ -690,17 +696,17 @@ class ClassificationFeedbackDisplay:
             return False
 
     def ensure_connected(self, timeout: float = 0.1) -> None:
-        """Attempt connection once if not yet connected.
+        """如果尚未连接，尝试连接一次。
 
-        Safe to call at phase boundaries but still does a blocking LSL
-        resolve — prefer calling ``try_connect`` explicitly before the
-        tight rendering loop whenever possible.
+        在相位边界调用是安全的，但仍会执行一次阻塞 LSL
+        resolve — 尽可能在进入紧密渲染循环之前显式调用
+        try_connect。
         """
         if not self._connected:
             self.try_connect(timeout=timeout)
 
     def pull_result(self) -> dict | None:
-        """Non-blocking pull of latest classification result."""
+        """非阻塞拉取最新的分类结果。"""
         if not self._inlet:
             return None
         try:
@@ -716,7 +722,7 @@ class ClassificationFeedbackDisplay:
             return None
 
     def get_feedback_text(self) -> str:
-        """Get current feedback text — **zero blocking**, safe for render loop."""
+        """获取当前反馈文本 — 零阻塞，对渲染循环安全。"""
         result = self.pull_result()
         if result is not None:
             self._last_label = result["label"]
@@ -732,12 +738,19 @@ class ClassificationFeedbackDisplay:
             return "检测到：右手意图"
         return ""
 
+    def clear(self) -> None:
+        """清除粘性反馈标签 — 在 trial 开始时调用以防止显示上一个 trial 的结果。"""
+        self._last_label = ""
+        self._last_confidence = 0.0
+
     @property
     def is_connected(self) -> bool:
         return self._connected
 
 
+# 会话 UI —— 管理所有视觉刺激的绘制与缓存
 class SessionUI:
+    # 缓存策略：image/rect/text stim 缓存避免每帧分配对象
     def __init__(self, win: visual.Window, stimuli: StimulusConfig, display: DisplayConfig) -> None:
         self.win = win
         self.stimuli = stimuli
@@ -847,6 +860,7 @@ class SessionUI:
         image.draw()
         return draw_size
 
+    # 参数不变时跳过 setter 调用，避免标记 stim dirty
     def _draw_border(
         self,
         *,
@@ -869,7 +883,7 @@ class SessionUI:
             self._rect_stim_cache[cache_key] = rect
             self._rect_param_cache[cache_key] = (pos, size, color, float(line_width))
 
-        # Skip setter calls when params unchanged — avoids marking stim dirty
+        # 参数不变时跳过 setter 调用 — 避免标记 stim dirty
         last = self._rect_param_cache.get(cache_key)
         new_params = (pos, size, color, float(line_width))
         if last is None or last[0] != pos:
@@ -884,6 +898,7 @@ class SessionUI:
         self._rect_param_cache[cache_key] = new_params
         rect.draw()
 
+    # 缓存 key = (pos, height, wrap_width, bold)
     def _draw_cached_text(
         self,
         *,
@@ -911,7 +926,7 @@ class SessionUI:
             self._text_stim_cache[cache_key] = stim
             self._text_param_cache[cache_key] = (pos, float(height), wrap_width, color, text)
 
-        # Skip setter calls when params unchanged — avoids marking stim dirty
+        # 参数不变时跳过 setter 调用 — 避免标记 stim dirty
         last = self._text_param_cache.get(cache_key)
         new_params = (pos, float(height), wrap_width, color, text)
         if last is None or last[:4] != new_params[:4]:
@@ -924,6 +939,7 @@ class SessionUI:
         self._text_param_cache[cache_key] = new_params
         stim.draw()
 
+    # display_mode 分发：both_sides / single_center / single_side
     def draw_dual_cue_screen(
         self,
         *,
@@ -940,14 +956,14 @@ class SessionUI:
         self._apply_stimulus_layout()
         self._draw_title(title)
 
-        # Determine which sides to show based on display_mode
+        # 根据 display_mode 决定显示哪些侧
         show_left = True
         show_right = True
         if display_mode in ("single_center", "single_side"):
             show_left = (target_side == "left")
             show_right = (target_side == "right")
 
-        # Determine positions based on display_mode
+        # 根据 display_mode 决定位置
         if display_mode == "single_center":
             left_pos = (0, y_pos) if show_left else (left_x_pos, y_pos)
             right_pos = (0, y_pos) if show_right else (right_x_pos, y_pos)
@@ -1015,7 +1031,7 @@ class SessionUI:
     def draw_fixation(self) -> None:
         visual.TextStim(
             self.win,
-            text="○",
+            text="\u25cb",
             height=0.28,
             color="white",
             font="Microsoft YaHei",
@@ -1032,7 +1048,7 @@ class SessionUI:
     def draw_arrow_cue(self, condition: str) -> None:
         self._apply_stimulus_layout()
         self._draw_title(CONDITION_TO_ARROW_CUE_TEXT[condition])
-        arrow = "←" if condition == "left" else "→"
+        arrow = "\u2190" if condition == "left" else "\u2192"
         self._draw_cached_text(
             text=arrow,
             pos=(0, 0),
@@ -1043,7 +1059,7 @@ class SessionUI:
     def draw_arrow_mi_task(self, condition: str) -> None:
         self._apply_stimulus_layout()
         self._draw_title(CONDITION_TO_ARROW_MI_TEXT[condition])
-        arrow = "←" if condition == "left" else "→"
+        arrow = "\u2190" if condition == "left" else "\u2192"
         self._draw_cached_text(
             text=arrow,
             pos=(0, 0),
@@ -1056,7 +1072,7 @@ class SessionUI:
         self._draw_title(CONDITION_TO_AROUSAL_CUE_TEXT[condition])
 
         if cue_style == "arrow":
-            arrow = "←" if condition == "left" else "→"
+            arrow = "\u2190" if condition == "left" else "\u2192"
             self._draw_cached_text(
                 text=arrow,
                 pos=(0, 0),
@@ -1075,6 +1091,7 @@ class SessionUI:
                 target_height=self.stimuli.image_height * self.stimuli.task_image_scale,
             )
 
+    # 中央单点 SSVEP 闪烁，不编码左右方向
     def draw_arousal_task_frame(
         self,
         condition: str,
@@ -1091,7 +1108,7 @@ class SessionUI:
         visible_opacity = dim_opacity + flicker_opacity * (1.0 - dim_opacity)
 
         if task_style == "arrow":
-            arrow = "←" if condition == "left" else "→"
+            arrow = "\u2190" if condition == "left" else "\u2192"
             self._draw_cached_text(
                 text=arrow,
                 pos=(0, 0),
@@ -1111,6 +1128,7 @@ class SessionUI:
                 opacity=visible_opacity,
             )
 
+    # frequency_coded 模式左右独立频率编码条件 / same_freq 模式不编码
     def draw_serial_ssvep_cue_frame(
         self,
         condition: str,
@@ -1120,7 +1138,7 @@ class SessionUI:
         self._apply_stimulus_layout()
         self._draw_title(CONDITION_TO_SERIAL_SSVEP_CUE_TEXT[condition])
 
-        # Determine frequencies based on mode
+        # 根据模式确定频率
         if ssvep_serial.cue_ssvep_mode == "frequency_coded":
             left_freq_hz = ssvep_serial.cue_ssvep_freq_left_hz
             right_freq_hz = ssvep_serial.cue_ssvep_freq_right_hz
@@ -1128,7 +1146,7 @@ class SessionUI:
             left_freq_hz = ssvep_serial.same_freq_hz
             right_freq_hz = ssvep_serial.same_freq_hz
 
-        # Determine which sides to show based on display mode and condition
+        # 根据显示模式和条件决定显示哪些侧
         show_left = True
         show_right = True
         if ssvep_serial.display_mode == "single_center":
@@ -1140,7 +1158,7 @@ class SessionUI:
         left_vis_opacity = ssvep_serial.dim_opacity + left_opacity * (1.0 - ssvep_serial.dim_opacity)
         right_vis_opacity = ssvep_serial.dim_opacity + right_opacity * (1.0 - ssvep_serial.dim_opacity)
 
-        # Determine positions
+        # 确定位置
         if ssvep_serial.display_mode == "single_center":
             left_pos = (0, 0) if show_left else (-0.38, 0)
             right_pos = (0, 0) if show_right else (0.38, 0)
@@ -1151,14 +1169,14 @@ class SessionUI:
         if ssvep_serial.cue_style == "arrow":
             if show_left:
                 self._draw_cached_text(
-                    text="←",
+                    text="\u2190",
                     pos=left_pos,
                     height=ssvep_serial.arrow_height,
                     color=ssvep_serial.arrow_color,
                 ).opacity = left_vis_opacity
             if show_right:
                 self._draw_cached_text(
-                    text="→",
+                    text="\u2192",
                     pos=right_pos,
                     height=ssvep_serial.arrow_height,
                     color=ssvep_serial.arrow_color,
@@ -1190,7 +1208,7 @@ class SessionUI:
         self._draw_title(CONDITION_TO_SERIAL_MI_TEXT[condition])
 
         if task_style == "arrow":
-            arrow = "←" if condition == "left" else "→"
+            arrow = "\u2190" if condition == "left" else "\u2192"
             self._draw_cached_text(
                 text=arrow,
                 pos=(0, 0),
@@ -1209,6 +1227,7 @@ class SessionUI:
                 target_height=self.stimuli.image_height * self.stimuli.task_image_scale,
             )
 
+    # 时间驱动 flicker，两种模式（image opacity / border color），三种 display_mode
     def draw_ssvep_frame(
         self,
         ssvep: SSVEPConfig,
@@ -1221,18 +1240,18 @@ class SessionUI:
         self._apply_stimulus_layout()
         self._draw_title(title)
 
-        # Determine which sides to render based on display_mode
+        # 根据 display_mode 决定渲染哪些侧
         show_left = True
         show_right = True
         if ssvep.display_mode in ("single_center", "single_side"):
             show_left = (target_side == "left")
             show_right = (target_side == "right")
 
-        # Time-driven flicker opacity — robust to frame drops
+        # 时间驱动 flicker opacity — 抗掉帧
         left_opacity = self._flicker_opacity(elapsed_time_s, ssvep.left_freq_hz, ssvep.waveform)
         right_opacity = self._flicker_opacity(elapsed_time_s, ssvep.right_freq_hz, ssvep.waveform)
 
-        # Determine positions based on display_mode
+        # 根据 display_mode 确定位置
         if ssvep.display_mode == "single_center":
             left_pos = (0, ssvep.flicker_y_pos) if show_left else (ssvep.left_x_pos, ssvep.flicker_y_pos)
             right_pos = (0, ssvep.flicker_y_pos) if show_right else (ssvep.right_x_pos, ssvep.flicker_y_pos)
@@ -1246,9 +1265,9 @@ class SessionUI:
         right_size = None
 
         if ssvep.flicker_mode == "image":
-            # Image flicker: opacity driven by waveform (0/1 for square, [0,1] for sine)
+            # 图片闪烁：opacity 由波形驱动（方波取 0/1，正弦取 [0,1]）
             if show_left:
-                # Map [0,1] → [dim_opacity, 1.0] for visual range
+                # 将 [0,1] 映射到视觉范围的 [dim_opacity, 1.0]
                 left_vis_opacity = ssvep.dim_opacity + left_opacity * (1.0 - ssvep.dim_opacity)
                 left_image = self.stimuli.ssvep_left_clean_image_path or self.stimuli.pure_mi_left_image_path
                 left_size = self._draw_positioned_image(
@@ -1267,7 +1286,7 @@ class SessionUI:
                     opacity=right_vis_opacity,
                 )
         else:
-            # Border flicker mode: static images + sinusoidally-modulated border color
+            # 边框闪烁模式：静态图片 + 正弦调制的边框颜色
             border_pad = 0.02
             if show_left:
                 left_bright_color = ssvep.target_ring_color if target_side == "left" else ssvep.bright_color
@@ -1306,7 +1325,7 @@ class SessionUI:
                         line_width=ssvep.flicker_border_width,
                     )
 
-        # Frequency labels – only for sides that are actually shown
+        # 频率标签 — 仅显示实际显示的侧
         if show_left:
             label_x = 0 if ssvep.display_mode == "single_center" else ssvep.left_x_pos
             self._draw_cached_text(
@@ -1322,8 +1341,8 @@ class SessionUI:
                 pos=(label_x, ssvep.flicker_y_pos - ssvep.flicker_size[1] / 2 - 0.07),
             )
 
-        # Draw target ring (outermost, on top of flickering border/image) — only in image mode
-        # In border mode the flickering border itself is already yellow for the target side
+        # 绘制目标环（最外层，叠在闪烁边框/图片之上）— 仅在 image 模式下
+        # 在 border 模式下，闪烁边框本身已经为目标侧染成黄色
         if ssvep.flicker_mode == "image" and target_side in {"left", "right"}:
             if ssvep.display_mode == "single_center":
                 target_x = 0
@@ -1345,6 +1364,7 @@ class SessionUI:
                 pos=(0.0, -0.34),
             )
 
+    # 根据 flashing_side 参数决定当前帧哪侧高亮
     def draw_p300_frame(
         self,
         p300: P300Config,
@@ -1379,7 +1399,7 @@ class SessionUI:
                 opacity=right_opacity,
             )
         else:
-            # Border flash mode (default): static images + flashing borders
+            # 边框闪烁模式（默认）：静态图片 + 闪烁边框
             left_border_color = p300.flash_color if flashing_side == "left" else p300.noflash_color
             right_border_color = p300.flash_color if flashing_side == "right" else p300.noflash_color
 
@@ -1410,7 +1430,7 @@ class SessionUI:
                     line_width=p300.flash_border_width,
                 )
 
-        # Draw target ring (outermost, on top of flashing border/image)
+        # 绘制目标环（最外层，叠在闪烁边框/图片之上）
         if target_side in {"left", "right"}:
             target_x = p300.left_x_pos if target_side == "left" else p300.right_x_pos
             target_size = left_size if target_side == "left" else right_size
@@ -1428,18 +1448,18 @@ class SessionUI:
                 pos=(0.0, -0.34),
             )
 
+    # 时间驱动设计 —— 用 elapsed_time_s 而非帧计数，抗掉帧；square 方波 / sine 正弦波
     def _flicker_opacity(self, elapsed_time_s: float, freq_hz: float, waveform: str = "square") -> float:
-        """Return an opacity value in [0, 1] for SSVEP flicker.
+        """返回 [0, 1] 范围内的 SSVEP 闪烁 opacity 值。
 
-        Time-driven: uses ``elapsed_time_s`` so the result is robust to
-        frame drops and does not require an integer ``frames_per_cycle``.
+        时间驱动：使用 elapsed_time_s，因此结果对
+        丢帧具有鲁棒性，不需要整数 frames_per_cycle。
 
-        *waveform*:
-          - ``"square"``: returns 1.0 for the first half of each period,
-            0.0 for the second half.  Stronger SSVEP response but more
-            visual fatigue.
-          - ``"sine"``: returns ``0.5 * (1 + sin(2πft))``, a smooth
-            sinusoidal modulation.  More comfortable, no harmonics.
+        waveform:
+          - "square": 每个周期的前半段返回 1.0，
+            后半段返回 0.0。SSVEP 响应更强但视觉疲劳更大。
+          - "sine": 返回 0.5 * (1 + sin(2pi*ft))，平滑的
+            正弦调制。更舒适，无谐波。
         """
         period_s = 1.0 / max(freq_hz, 1e-6)
         phase_in_period = elapsed_time_s % period_s
@@ -1449,42 +1469,44 @@ class SessionUI:
         else:  # square
             return 1.0 if phase_in_period < (period_s / 2.0) else 0.0
 
+    # 在 PsychoPy [-1,1] 色彩空间中做 RGB 线性插值，输出 hex
     @staticmethod
     def _interpolate_color(color_dark: str, color_bright: str, t: float) -> str:
-        """Linearly interpolate between two hex/colourspace colours.
+        """在两个十六进制/色彩空间颜色之间做线性插值。
 
-        *t* ∈ [0, 1] where 0 → dark, 1 → bright.  Returns a hex string.
+        t 在 [0, 1] 范围内，0 表示暗色，1 表示亮色。返回十六进制字符串。
         """
         from psychopy.colors import Color
         dark = Color(color_dark).rgb  # (r, g, b) each in [-1, 1]
         bright = Color(color_bright).rgb
         rgb = tuple(dark[i] + t * (bright[i] - dark[i]) for i in range(3))
-        # Convert from PsychoPy [-1,1] to [0,255]
+        # 从 PsychoPy [-1,1] 转换为 [0,255]
         rgb255 = tuple(int(round((v + 1.0) * 127.5)) for v in rgb)
         rgb255 = tuple(max(0, min(255, v)) for v in rgb255)
         return f"#{rgb255[0]:02x}{rgb255[1]:02x}{rgb255[2]:02x}"
 
     # ------------------------------------------------------------------
-    # AO video pre-loading (session-level lifecycle)
+    # AO 视频预加载（session 级生命周期）
     # ------------------------------------------------------------------
 
+    # 预加载避免每个 trial 创建 MovieStim 阻塞数秒
     def preload_ao_videos(
         self,
         video_path: Path | None,
         video_start_s: float,
         image_scale: float,
     ) -> None:
-        """Pre-load AO video *MovieStim* objects for left and right conditions.
+        """预加载 AO 视频的 MovieStim 对象，用于左右手条件。
 
-        Call **once** at session start so that subsequent
-        :func:`show_video_phase` calls can reuse the pre-loaded objects
-        instead of creating a new ``MovieStim`` on every trial (which
-        blocks the main thread for several seconds).
+        在 session 开始时一次性调用，以便后续的
+        show_video_phase 调用可以复用预加载的对象，
+        而不是在每个 trial 上创建新的 MovieStim
+        （这会在主线程阻塞数秒）。
 
-        The videos are created with ``noAudio=True`` and
-        ``autoStart=False`` to minimise initialisation overhead.
+        视频创建时设置 noAudio=True 和
+        autoStart=False 以最小化初始化开销。
         """
-        # Release any previously loaded videos first.
+        # 先释放任何先前加载的视频。
         self.release_ao_videos()
 
         self._ao_video_path = video_path
@@ -1514,15 +1536,15 @@ class SessionUI:
                 )
                 continue
 
-            # Scale video to match the same target height as static images.
+            # 缩放视频以匹配静态图像的相同目标高度。
             native_size = movie.size
             if native_size[1] > 0:
                 aspect_ratio = native_size[0] / native_size[1]
             else:
-                aspect_ratio = 16 / 9  # fallback for 1280x720 video
+                aspect_ratio = 16 / 9  # 1280x720 视频的回退
             movie.size = (target_height * aspect_ratio, target_height)
 
-            # Pause immediately – we will seek + play when a phase needs it.
+            # 立即暂停 — 当相位需要时才 seek + play。
             movie.pause()
 
             self._ao_video_pool[condition] = movie
@@ -1535,20 +1557,19 @@ class SessionUI:
             )
 
     def get_ao_video(self, flip_horizontal: bool) -> visual.MovieStim | None:
-        """Return the pre-loaded AO *MovieStim* for the given flip state."""
+        """返回给定翻转状态的预加载 AO MovieStim。"""
         key = "right" if flip_horizontal else "left"
         return self._ao_video_pool.get(key)
 
     def release_ao_videos(self) -> None:
-        """Pause and release all pre-loaded AO videos.
+        """暂停并释放所有预加载的 AO 视频。
 
-        Safe to call multiple times; no-op if the pool is empty.
+        可安全多次调用；如果池为空则为空操作。
 
-        We intentionally do **not** call ``movie.unload()`` here because
-        ``MovieStim.unload()`` → ``_player.close()`` can deadlock when the
-        ffpyplayer decoder thread is still running.  Instead we only pause
-        the movie and drop our references.  The OpenGL textures are freed
-        when the window is closed (which destroys the GL context).
+        我们故意没有在这里调用 movie.unload()，因为
+        MovieStim.unload() 在 ffpyplayer 解码器线程仍在运行时可能死锁。
+        我们只暂停电影并丢弃引用。OpenGL 纹理在窗口
+        关闭时（销毁 GL 上下文时）被释放。
         """
         for _key, movie in self._ao_video_pool.items():
             try:
@@ -1560,8 +1581,9 @@ class SessionUI:
         self._ao_video_start_s = 0.0
 
 
+# CLI 参数定义（仅少量快捷入口，完整参数配置在对话框和 YAML 中完成）
 def parse_args() -> argparse.Namespace:
-    """Parse core CLI arguments. All other settings come from YAML config."""
+    """解析核心 CLI 参数。所有其他设置来自 YAML 配置。"""
     parser = argparse.ArgumentParser(
         description="PsychoPy MI experiment for OpenBCI GUI + UDP marker workflow.",
         epilog="详细参数请编辑 YAML 配置文件（默认 config_default.yaml）。优先级：CLI > 用户 YAML > 内置默认 YAML。",
@@ -1586,7 +1608,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--csv-marker-mode", choices=["legacy", "detailed"], default=None, help="CSV marker 模式：legacy(0/1/2)/detailed(实际值)（覆盖 YAML 配置）")
     parser.add_argument("--refresh-rate", type=float, default=None, help="显示器刷新率 Hz（覆盖 YAML 配置，SSVEP/P300 需要）")
     parser.add_argument("--config", default="config_default.yaml", help="YAML 配置文件路径")
-    # SSVEP Arousal specific arguments (overrides YAML)
+    # SSVEP Arousal 特定参数（覆盖 YAML）
     parser.add_argument("--ssvep-arousal-freq-mode", default=None, help="SSVEP Arousal 频率模式 (fixed/random)")
     parser.add_argument("--ssvep-arousal-fixed-freq-hz", type=float, default=None, help="SSVEP Arousal 固定频率 Hz")
     parser.add_argument("--ssvep-arousal-freq-min-hz", type=float, default=None, help="SSVEP Arousal 最小频率 Hz")
@@ -1598,7 +1620,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ssvep-arousal-dim-opacity", type=float, default=None, help="SSVEP Arousal 透明度")
     parser.add_argument("--ssvep-arousal-arrow-color", default=None, help="SSVEP Arousal 箭头颜色")
     parser.add_argument("--ssvep-arousal-arrow-height", type=float, default=None, help="SSVEP Arousal 箭头大小")
-    # SSVEP Serial specific arguments (overrides YAML)
+    # SSVEP Serial 特定参数（覆盖 YAML）
     parser.add_argument("--ssvep-serial-cue-ssvep-freq-left-hz", type=float, default=None, help="SSVEP Serial 提示左频率 Hz")
     parser.add_argument("--ssvep-serial-cue-ssvep-freq-right-hz", type=float, default=None, help="SSVEP Serial 提示右频率 Hz")
     parser.add_argument("--ssvep-serial-cue-ssvep-mode", default=None, help="SSVEP Serial 提示模式 (frequency_coded/same_freq)")
@@ -1620,10 +1642,10 @@ def parse_args() -> argparse.Namespace:
 
 
 # ---------------------------------------------------------------------------
-# YAML config loading & merging
+# YAML 配置加载与合并
 # ---------------------------------------------------------------------------
 
-# Mapping: (yaml_section, yaml_key) -> flat_key (old CLI arg name)
+# 将 YAML 的 (section, key) 映射为扁平 key，对接旧版 CLI 参数名
 _YAML_TO_FLAT: dict[tuple[str, str], str] = {
     # general
     ("general", "fullscreen"): "fullscreen",
@@ -1751,12 +1773,12 @@ _YAML_TO_FLAT: dict[tuple[str, str], str] = {
     ("mi_ssvep_rt", "dim_opacity"): "ssvep_rt_dim_opacity",
 }
 
-# Reverse mapping: flat_key -> (yaml_section, yaml_key)
+# 反向映射：flat_key -> (yaml_section, yaml_key)
 _FLAT_TO_YAML: dict[str, tuple[str, str]] = {v: k for k, v in _YAML_TO_FLAT.items()}
 
 
 def load_yaml_config(path: Path) -> dict[str, Any]:
-    """Load YAML config file and return nested dict. Returns empty dict on failure."""
+    """加载 YAML 配置文件并返回嵌套字典。失败时返回空字典。"""
     if not path.exists():
         print(f"WARNING: config file not found: {path}, using built-in defaults.")
         return {}
@@ -1766,7 +1788,7 @@ def load_yaml_config(path: Path) -> dict[str, Any]:
 
 
 def _flatten_yaml(yaml_dict: dict[str, Any]) -> dict[str, Any]:
-    """Flatten nested YAML sections into a flat dict using _YAML_TO_FLAT mapping."""
+    """使用 _YAML_TO_FLAT 映射将嵌套 YAML section 展平成扁平字典。"""
     flat: dict[str, Any] = {}
     for (section, key), flat_key in _YAML_TO_FLAT.items():
         section_dict = yaml_dict.get(section, {})
@@ -1775,17 +1797,18 @@ def _flatten_yaml(yaml_dict: dict[str, Any]) -> dict[str, Any]:
     return flat
 
 
+# 优先级链：对话框 > CLI 显式传入 > YAML 配置 > 内置默认值（对话框是主入口，CLI 仅作快捷覆盖）
 def resolve_config(cli_args: argparse.Namespace, yaml_dict: dict[str, Any]) -> dict[str, Any]:
-    """Merge YAML config with CLI overrides. Priority: CLI > YAML > built-in defaults.
+    """合并 YAML 配置与 CLI/对话框覆盖。优先级：对话框 > CLI > YAML > 内置默认值（对话框值在调用前已注入 cli_args）。
 
-    Returns a flat dict with the same key names as the old CLI args, so build_config()
-    can consume it with minimal changes.
+    返回一个扁平字典，键名与旧版 CLI 参数名相同，以便 build_config()
+    能以最小改动消费它。
     """
-    # 1. Flatten YAML into flat dict
+    # 1. 将 YAML 展平为扁平字典
     merged = _flatten_yaml(yaml_dict)
 
-    # 2. CLI args that map directly to flat keys (only override if user explicitly
-    #    provided them; we detect this by checking against the parser defaults)
+    # 2. 直接映射到扁平键的 CLI 参数（仅在用户显式提供时才覆盖；
+    #    我们通过与解析器默认值对比来检测）
     cli_overrides: dict[str, Any] = {
         "participant": cli_args.participant,
         "session": cli_args.session,
@@ -1808,7 +1831,7 @@ def resolve_config(cli_args: argparse.Namespace, yaml_dict: dict[str, Any]) -> d
         cli_overrides["labrecorder_csv_marker_mode"] = cli_args.csv_marker_mode
     if getattr(cli_args, "refresh_rate", None) is not None:
         cli_overrides["refresh_rate"] = cli_args.refresh_rate
-    # SSVEP-specific overrides from session dialog
+    # 来自会话对话框的 SSVEP 特定覆盖
     if getattr(cli_args, "ssvep_flicker_mode", None) is not None:
         cli_overrides["ssvep_flicker_mode"] = cli_args.ssvep_flicker_mode
     if getattr(cli_args, "ssvep_waveform", None) is not None:
@@ -1819,12 +1842,12 @@ def resolve_config(cli_args: argparse.Namespace, yaml_dict: dict[str, Any]) -> d
         cli_overrides["ssvep_left_freq"] = cli_args.ssvep_left_freq
     if getattr(cli_args, "ssvep_right_freq", None) is not None:
         cli_overrides["ssvep_right_freq"] = cli_args.ssvep_right_freq
-    # P300-specific overrides from session dialog
+    # 来自会话对话框的 P300 特定覆盖
     if getattr(cli_args, "p300_flicker_mode", None) is not None:
         cli_overrides["p300_flicker_mode"] = cli_args.p300_flicker_mode
     if getattr(cli_args, "p300_target_probability", None) is not None:
         cli_overrides["p300_target_probability"] = cli_args.p300_target_probability
-    # SSVEP Arousal specific overrides from session dialog or CLI
+    # 来自会话对话框或 CLI 的 SSVEP Arousal 特定覆盖
     if getattr(cli_args, "ssvep_arousal_freq_mode", None) is not None:
         cli_overrides["ssvep_arousal_freq_mode"] = cli_args.ssvep_arousal_freq_mode
     if getattr(cli_args, "ssvep_arousal_fixed_freq_hz", None) is not None:
@@ -1847,7 +1870,7 @@ def resolve_config(cli_args: argparse.Namespace, yaml_dict: dict[str, Any]) -> d
         cli_overrides["ssvep_arousal_arrow_color"] = cli_args.ssvep_arousal_arrow_color
     if getattr(cli_args, "ssvep_arousal_arrow_height", None) is not None:
         cli_overrides["ssvep_arousal_arrow_height"] = cli_args.ssvep_arousal_arrow_height
-    # SSVEP Serial specific overrides from session dialog or CLI
+    # 来自会话对话框或 CLI 的 SSVEP Serial 特定覆盖
     if getattr(cli_args, "ssvep_serial_cue_ssvep_freq_left_hz", None) is not None:
         cli_overrides["ssvep_serial_cue_ssvep_freq_left_hz"] = cli_args.ssvep_serial_cue_ssvep_freq_left_hz
     if getattr(cli_args, "ssvep_serial_cue_ssvep_freq_right_hz", None) is not None:
@@ -1882,7 +1905,7 @@ def resolve_config(cli_args: argparse.Namespace, yaml_dict: dict[str, Any]) -> d
         cli_overrides["ssvep_serial_arrow_color"] = cli_args.ssvep_serial_arrow_color
     if getattr(cli_args, "ssvep_serial_arrow_height", None) is not None:
         cli_overrides["ssvep_serial_arrow_height"] = cli_args.ssvep_serial_arrow_height
-    # SSVEP RT specific overrides from session dialog or CLI
+    # 来自会话对话框或 CLI 的 SSVEP RT 特定覆盖
     if getattr(cli_args, "ssvep_rt_mi_enabled", None) is not None:
         cli_overrides["ssvep_rt_mi_enabled"] = cli_args.ssvep_rt_mi_enabled
     if getattr(cli_args, "ssvep_rt_mi_checkpoint_path", None) is not None:
@@ -1903,6 +1926,8 @@ def resolve_config(cli_args: argparse.Namespace, yaml_dict: dict[str, Any]) -> d
         cli_overrides["ssvep_rt_waveform"] = cli_args.ssvep_rt_waveform
     if getattr(cli_args, "ssvep_rt_display_mode", None) is not None:
         cli_overrides["ssvep_rt_display_mode"] = cli_args.ssvep_rt_display_mode
+    if getattr(cli_args, "ssvep_rt_enable_diag", None) is not None:
+        cli_overrides["ssvep_rt_enable_diag"] = cli_args.ssvep_rt_enable_diag
 
     merged.update(cli_overrides)
     return merged
@@ -1925,6 +1950,7 @@ def get_trial_type_label(trial_type: str) -> str:
     return TRIAL_TYPE_TO_LABEL[trial_type]
 
 
+# 各范式 trial 的阶段序列定义
 def get_phase_sequence_for_trial_type(trial_type: str) -> tuple[str, ...]:
     if trial_type == "pure_mi":
         return ("fixation", "cue", "pure_mi", "iti")
@@ -1970,8 +1996,9 @@ def get_ao_image_path(stimuli: StimulusConfig, condition: str) -> Path | None:
 
 
 
+# 递归合并字典：override 值完全覆盖 base 中的同名字典
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    """Recursively merge override into base. override values take precedence."""
+    """递归将 override 合并到 base 中。override 的值优先。"""
     result = dict(base)
     for key, val in override.items():
         if key in result and isinstance(result[key], dict) and isinstance(val, dict):
@@ -1981,24 +2008,26 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return result
 
 
+# 以 OLM/ 项目根目录为基准解析相对路径
 def _resolve_project_relative_path(path_str: str) -> Path:
-    """Resolve a path that may be relative to the project root (OLM/).
+    """解析相对于项目根目录 (OLM/) 的路径。
 
-    If *path_str* is already absolute, return it as-is.
-    Otherwise, resolve it relative to the parent of the script directory
-    (i.e. ``OLM/``) so that ``LabRecorder/LabRecorderCLI.exe`` resolves
-    correctly regardless of the current working directory.
+    如果 path_str 已经是绝对路径，则原样返回。
+    否则，相对于脚本目录的父目录（即 OLM/）解析，
+    以便 LabRecorder/LabRecorderCLI.exe 无论当前工作目录
+    如何都能正确解析。
     """
     p = Path(path_str)
     if p.is_absolute():
         return p
-    # __file__ is mi_psychopy/run_mi_experiment.py → parent is mi_psychopy/ → parent is OLM/
+    # __file__ 是 mi_psychopy/run_mi_experiment.py → 父目录是 mi_psychopy/ → 再父目录是 OLM/
     project_root = Path(__file__).resolve().parent.parent
     return (project_root / p).resolve()
 
 
+# 配置装配流水线：YAML 加载 → 扁平化 → 对话框覆盖 → CLI 覆盖 → 校验 → 冻结 dataclass（对话框是参数主入口）
 def build_config(args: argparse.Namespace) -> ExperimentConfig:
-    # Always load built-in defaults as base, then overlay user config
+    # 始终先加载内置默认值作为基础，再叠加用户配置
     script_dir = Path(__file__).resolve().parent
     default_yaml_path = script_dir / "config_default.yaml"
     base_dict = load_yaml_config(default_yaml_path)
@@ -2009,7 +2038,7 @@ def build_config(args: argparse.Namespace) -> ExperimentConfig:
             base_dict = _deep_merge(base_dict, user_dict)
     c = resolve_config(args, base_dict)
 
-    # --- Validation ---
+    # --- 校验 ---
     if c["trial_mode"] in ("ao_mi", "mixed", "mi_ssvep", "pure_ssvep", "mi_p300", "mi_arrow", "mi_ssvep_arousal", "mi_ssvep_serial", "mi_ssvep_rt") and c["class_mode"] != "binary":
         raise SystemExit("AO+MI / MI+SSVEP / MI+P300 / MI-Arrow / SSVEP Arousal / Serial SSVEP→MI 首版仅支持 binary 模式。请使用 --class-mode binary。")
     if c["refresh_rate"] <= 0:
@@ -2039,13 +2068,13 @@ def build_config(args: argparse.Namespace) -> ExperimentConfig:
     if not (0.0 < c["p300_target_probability"] < 1.0):
         raise SystemExit("mi_p300.target_probability 必须在 (0.0, 1.0) 范围内。")
     
-    # Validate and auto-adjust P300 target count
+    # 验证并自动调整 P300 目标数量
     p300_n_flashes = max(1, int(c["p300_duration"] / c["p300_soa"]))
     p300_n_target = round(p300_n_flashes * c["p300_target_probability"])
     p300_actual_prob = p300_n_target / p300_n_flashes if p300_n_flashes > 0 else 0
     
     if p300_n_target < 1:
-        # Auto-adjust duration to ensure at least 1 target
+        # 自动调整 duration 以确保至少 1 个目标
         min_n_flashes = int(1.0 / c["p300_target_probability"]) + 1
         min_duration = min_n_flashes * c["p300_soa"]
         print(
@@ -2070,9 +2099,9 @@ def build_config(args: argparse.Namespace) -> ExperimentConfig:
     if not (0.0 <= c["p300_dim_opacity"] <= 1.0):
         raise SystemExit("mi_p300.dim_opacity 必须在 [0.0, 1.0] 范围内。")
 
-    # Note: with time-driven sinusoidal flicker, non-integer frames_per_cycle
-    # is no longer a correctness issue (sin() is frame-rate independent).
-    # We keep this as an informational note for low-frame-rate scenarios.
+    # 注意：使用时间驱动正弦 flicker 时，非整数 frames_per_cycle
+    # 不再是正确性问题（sin() 与帧率无关）。
+    # 我们保留此信息性注释用于低帧率场景。
     for label, freq in [("left", c["ssvep_left_freq"]), ("right", c["ssvep_right_freq"])]:
         frames_per_cycle = c["refresh_rate"] / freq
         if frames_per_cycle != round(frames_per_cycle):
@@ -2227,6 +2256,8 @@ def build_config(args: argparse.Namespace) -> ExperimentConfig:
             dark_color=c.get("ssvep_rt_dark_color", "black"),
             flicker_border_width=c.get("ssvep_rt_flicker_border_width", 4.0),
             dim_opacity=c.get("ssvep_rt_dim_opacity", 0.0),
+            enable_diag=c.get("ssvep_rt_enable_diag", False),
+            diag_dir=c.get("ssvep_rt_diag_dir", "diag"),
         ),
         network=NetworkConfig(
             udp_ip=c["udp_ip"],
@@ -2264,14 +2295,14 @@ def get_ssvep_target_freq(config: ExperimentConfig, condition: str) -> float:
 
 
 def _build_metadata_payload(config: ExperimentConfig) -> dict[str, Any]:
-    """Build paradigm-aware metadata payload for LSL stream and JSON file.
+    """构建范式感知的元数据负载，用于 LSL 流和 JSON 文件。
 
-    Only includes sections relevant to the active trial mode:
-    - All modes: trial_type, class_mode, participant, session, run, sample_rate,
+    仅包含与活跃 trial 模式相关的 section:
+    - 所有模式: trial_type, class_mode, participant, session, run, sample_rate,
       channel_names, marker_mapping, mi section
-    - mi_ssvep: ssvep section (frequencies, flicker mode, etc.)
-    - mi_p300: p300 section (SOA, flash duration, etc.)
-    - ao_mi: ao_mi section (phase durations)
+    - mi_ssvep: ssvep section（频率、闪烁模式等）
+    - mi_p300: p300 section（SOA、闪烁时长等）
+    - ao_mi: ao_mi section（相位时长）
     """
     payload: dict[str, Any] = {
         "trial_type": config.session_cfg.trial_mode,
@@ -2359,11 +2390,11 @@ def _build_metadata_payload(config: ExperimentConfig) -> dict[str, Any]:
 
 
 def publish_experiment_metadata(config: ExperimentConfig) -> None:
-    """Create an LSL StreamOutlet with experiment metadata so LabRecorder captures it.
+    """创建一个 LSL StreamOutlet 携带实验元数据，以便 LabRecorder 捕获它。
 
-    Pushes one sample containing a JSON payload with all experiment parameters.
-    The stream type is ``experiment_metadata`` so downstream tools can identify it.
-    If *pylsl* is not installed, prints a warning and returns silently.
+    推送一个包含所有实验参数 JSON 负载的样本。
+    流类型为 experiment_metadata，下游工具可以识别它。
+    如果未安装 pylsl，则打印警告并静默返回。
     """
     if pylsl is None:
         print("WARNING: pylsl 未安装，跳过 LSL 元数据流推送（仅写 session_config.json）")
@@ -2375,13 +2406,13 @@ def publish_experiment_metadata(config: ExperimentConfig) -> None:
         name="mi_experiment_metadata",
         type="experiment_metadata",
         channel_count=1,
-        nominal_srate=0,  # irregular rate — only one sample
+        nominal_srate=0,  # 不规则速率 — 仅一个样本
         channel_format=pylsl.cf_string,
         source_id="mi_experiment_metadata",
     )
-    # Build XML desc programmatically — each top-level key becomes a child element.
-    # Nested dicts/lists are serialised as JSON strings inside the element.
-    # (pylsl 1.18.1 XMLElement lacks from_string(); use append_child/append_child_value)
+    # 以编程方式构建 XML desc — 每个顶级键成为子元素。
+    # 嵌套的 dict/list 在元素内序列化为 JSON 字符串。
+    # (pylsl 1.18.1 XMLElement 缺少 from_string(); 使用 append_child/append_child_value)
     meta = info.desc().append_child("experiment_metadata")
     for key, value in payload.items():
         if isinstance(value, (dict, list)):
@@ -2390,7 +2421,7 @@ def publish_experiment_metadata(config: ExperimentConfig) -> None:
             meta.append_child_value(key, str(value))
 
     outlet = pylsl.StreamOutlet(info)
-    # Push one sample so LabRecorder records this stream
+    # 推送一个样本以便 LabRecorder 记录此流
     outlet.push_sample([json.dumps(payload)])
 
     meta_info = f"trial_type={config.session_cfg.trial_mode}"
@@ -2402,11 +2433,11 @@ def publish_experiment_metadata(config: ExperimentConfig) -> None:
 
 
 def write_session_config_json(config: ExperimentConfig, run_dir: Path) -> Path:
-    """Write experiment metadata to ``session_config.json`` as a backup for XDF metadata.
+    """将实验元数据写入 session_config.json 作为 XDF 元数据的备份。
 
-    The JSON file is placed in the same directory as the XDF output so that
-    downstream tools (e.g. ``verify_ssvep_signal.py``) can fall back to it
-    when the XDF file lacks an ``experiment_metadata`` stream.
+    JSON 文件放置在与 XDF 输出相同的目录中，以便
+    下游工具（例如 verify_ssvep_signal.py）在
+    XDF 文件缺少 experiment_metadata 流时可以回退到它。
     """
     payload = _build_metadata_payload(config)
     path = run_dir / "session_config.json"
@@ -2415,6 +2446,7 @@ def write_session_config_json(config: ExperimentConfig, run_dir: Path) -> Path:
     return path
 
 
+# Trial 随机化：每 block 内 shuffle 所有 trial_specs
 def build_blocks(config: ExperimentConfig) -> list[list[Trial]]:
     session_cfg = config.session_cfg
     rng = random.Random(session_cfg.seed)
@@ -2434,13 +2466,13 @@ def build_blocks(config: ExperimentConfig) -> list[list[Trial]]:
         for trial_index_in_block, (trial_type, condition) in enumerate(trial_specs, start=1):
             ssvep_target_side = condition if trial_type in ("mi_ssvep", "pure_ssvep", "mi_ssvep_serial", "mi_ssvep_rt") else ""
             p300_target_side = condition if trial_type == "mi_p300" else ""
-            # Compute ssvep_arousal_freq_hz
+            # 计算 ssvep_arousal_freq_hz
             ssvep_arousal_freq_hz = 0.0
             if trial_type == "mi_ssvep_arousal":
                 if config.ssvep_arousal.freq_mode == "fixed":
                     ssvep_arousal_freq_hz = config.ssvep_arousal.fixed_freq_hz
                 else:
-                    # Random between min and max
+                    # 在最小和最大之间随机
                     ssvep_arousal_freq_hz = rng.uniform(config.ssvep_arousal.freq_min_hz, config.ssvep_arousal.freq_max_hz)
             block_trials.append(
                 Trial(
@@ -2591,6 +2623,7 @@ def write_session_plan(config: ExperimentConfig, blocks: Sequence[Sequence[Trial
     output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+# waitBlanking=True 垂直同步, useFBO=True 离屏渲染防闪烁
 def create_psychopy_window(display: DisplayConfig) -> visual.Window:
     try:
         win = visual.Window(
@@ -2604,8 +2637,8 @@ def create_psychopy_window(display: DisplayConfig) -> visual.Window:
             useFBO=True,
         )
 
-        # In windowed mode, PsychoPy may ignore the screen parameter and place
-        # the window on the primary monitor. Force the window position.
+        # 窗口模式下，PsychoPy 可能忽略 screen 参数并将窗口放在主监视器上。
+        # 强制设置窗口位置。
         if not display.fullscreen:
             try:
                 from pyglet.canvas import get_display
@@ -2613,15 +2646,15 @@ def create_psychopy_window(display: DisplayConfig) -> visual.Window:
                 pyglet_screens = pyglet_display.get_screens()
                 if 0 <= display.display_index < len(pyglet_screens):
                     target_screen = pyglet_screens[display.display_index]
-                    # Center the window on the target screen
+                    # 将窗口居中于目标屏幕
                     win_x = target_screen.x + (target_screen.width - display.window_width) // 2
                     win_y = target_screen.y + (target_screen.height - display.window_height) // 2
                     
-                    # Move the window
+                    # 移动窗口
                     pyglet_win = win.backend.window
                     pyglet_win.set_location(win_x, win_y)
             except Exception:
-                pass  # Non-critical, window will still work
+                pass  # 非关键的，窗口仍然可以工作
 
         return win
     except Exception as exc:
@@ -2660,17 +2693,17 @@ def create_window(display: DisplayConfig) -> visual.Window:
     return create_psychopy_window(display)
 
 
+# 10 帧预热 + 120 帧计时测量实际刷新率
 def calibrate_refresh_rate(win: visual.Window, n_frames: int = 120) -> float:
-    """Measure actual monitor refresh rate by performing a timed flip loop.
+    """通过执行计时 flip 循环来测量实际显示器刷新率。
 
-    Returns the measured refresh rate in Hz.  The window should already be
-    created and visible.  A short warm-up of 10 flips is performed before
-    the timed measurement to allow the GPU pipeline to stabilise.
+    返回测量到的刷新率（Hz）。窗口应已创建并可见。
+    在计时测量前会进行 10 次 flip 的短预热，以让 GPU 管线稳定。
     """
-    # Warm-up flips to stabilise the GPU pipeline
+    # 预热翻转以稳定 GPU 管线
     for _ in range(10):
         win.flip()
-    # Timed measurement
+    # 计时测量
     timer = core.Clock()
     for _ in range(n_frames):
         win.flip()
@@ -2688,8 +2721,8 @@ def recreate_window(
     target_size = size or (ui.display.window_width, ui.display.window_height)
     target_fullscreen = current_fullscreen if fullscreen is None else fullscreen
 
-    # Release AO videos before window recreation – their OpenGL textures
-    # are bound to the old window's context and would crash on the new one.
+    # 在窗口重建前释放 AO 视频 — 它们的 OpenGL 纹理
+    # 绑定到旧窗口的上下文，在新窗口上会导致崩溃。
     saved_video_path = ui._ao_video_path
     saved_video_start_s = ui._ao_video_start_s
     saved_image_scale = ui.stimuli.task_image_scale
@@ -2708,16 +2741,15 @@ def recreate_window(
     old_win = ui.win
     ui.win = new_win
     ui.display = new_display
-    # Clear all stim caches: cached objects are bound to the old window's
-    # OpenGL context which is about to be destroyed.  Drawing them on the
-    # new window would crash.
+    # 清除所有 stim 缓存：缓存的对象绑定到旧窗口的
+    # OpenGL 上下文（即将被销毁）。在新窗口上绘制它们会导致崩溃。
     ui._text_stim_cache.clear()
     ui._image_stim_cache.clear()
     ui._rect_stim_cache.clear()
     ui._image_draw_size_cache.clear()
     old_win.close()
 
-    # Re-preload AO videos for the new OpenGL context.
+    # 为新 OpenGL 上下文重新预加载 AO 视频。
     if saved_video_path is not None:
         ui.preload_ao_videos(saved_video_path, saved_video_start_s, saved_image_scale)
 
@@ -2750,6 +2782,7 @@ def handle_runtime_window_hotkeys(ui: SessionUI) -> None:
                 set_windowed_size(ui, presets[preset_index])
 
 
+# 轮询循环 + 重绘：每 10ms 检测一次按键并调用 redraw()
 def wait_for_space_or_abort(
     ui: SessionUI | None = None,
     redraw: Callable[[], None] | None = None,
@@ -2774,11 +2807,11 @@ def wait_for_key_or_abort(
     ui: SessionUI | None = None,
     redraw: Callable[[], None] | None = None,
 ) -> str:
-    """Wait for one of the specified keys or ESC to abort.
+    """等待指定按键之一或 ESC 中止。
     
-    Returns the key that was pressed (lowercase).
+    返回按下的键（小写）。
     """
-    # Add escape to allowed keys
+    # 将 escape 添加到允许的按键列表
     all_keys = list(set(k.lower() for k in key_list) | {"escape"})
     event.clearEvents()
     while True:
@@ -2796,6 +2829,7 @@ def wait_for_key_or_abort(
         return pressed
 
 
+# 轮询循环 + 重绘：每 10ms 检测一次按键并调用 redraw()
 def wait_or_abort(
     duration_s: float,
     ui: SessionUI | None = None,
@@ -2812,6 +2846,7 @@ def wait_or_abort(
         core.wait(0.01, hogCPUperiod=0.005)
 
 
+# redraw 闭包模式：绘制后调用 win.flip()
 def show_text_screen(
     ui: SessionUI,
     title: str,
@@ -2844,6 +2879,7 @@ def show_text_screen(
         raise
 
 
+# 首帧通过 callOnFlip 发送 marker，之后由 redraw 维持画面
 def show_timed_text_phase(
     ui: SessionUI,
     title: str,
@@ -2935,6 +2971,7 @@ def show_arousal_cue_phase(
     wait_or_abort(duration_s, ui=ui, redraw=redraw)
 
 
+# per-trial 随机频率（18-25Hz）或固定频率中央闪烁
 def show_arousal_task_phase(
     ui: SessionUI,
     phase: PhaseSpec,
@@ -2986,6 +3023,7 @@ def show_arousal_task_phase(
     }
 
 
+# 频率编码 vs 同频模式在循环中 fork
 def show_serial_ssvep_cue_phase(
     ui: SessionUI,
     phase: PhaseSpec,
@@ -2996,7 +3034,7 @@ def show_serial_ssvep_cue_phase(
     frame_index = 0
     timer = core.Clock()
 
-    # Determine frequencies based on mode
+    # 根据模式确定频率
     if ssvep_serial.cue_ssvep_mode == "frequency_coded":
         left_freq_hz = ssvep_serial.cue_ssvep_freq_left_hz
         right_freq_hz = ssvep_serial.cue_ssvep_freq_right_hz
@@ -3058,6 +3096,7 @@ def show_serial_mi_phase(
     wait_or_abort(duration_s, ui=ui, redraw=redraw)
 
 
+# 注视点 ○ 渲染
 def show_fixation_phase(
     ui: SessionUI,
     duration_s: float,
@@ -3074,6 +3113,7 @@ def show_fixation_phase(
     wait_or_abort(duration_s, ui=ui, redraw=redraw)
 
 
+# ⚠ 性能关键：GC 关闭 + frameInterval 关闭 + 时间驱动 flicker + 单次 getKeys/帧
 def show_ssvep_phase(
     ui: SessionUI,
     phase: PhaseSpec,
@@ -3088,7 +3128,7 @@ def show_ssvep_phase(
     _target_freq_hz = phase.ssvep_target_freq_hz
     _ALL_KEYS = ["f11", "1", "2", "3", "escape"]
 
-    # GC OFF + disable frame-interval tracking during tight render loop
+    # GC 关闭 + 禁用帧间隔跟踪，在紧密渲染循环期间
     import gc as _gc
     _gc_was_enabled = _gc.isenabled()
     if _gc_was_enabled:
@@ -3137,6 +3177,7 @@ def show_ssvep_phase(
     }
 
 
+# ⚠ SSVEPConfig-from-SSVEPRTConfig 转换 + LSL 非阻塞反馈叠加
 def show_ssvep_rt_phase(
     ui: SessionUI,
     phase: PhaseSpec,
@@ -3148,7 +3189,7 @@ def show_ssvep_rt_phase(
 
     Render-loop design rules for stable framerate:
     - Zero blocking calls (no LSL resolve, no disk I/O, no network)
-    - Single ``event.getKeys`` per frame (OS event-queue polling is expensive)
+    - Single event.getKeys per frame (OS event-queue polling is expensive)
     - Pre-connect feedback before entering the loop
     - Pre-compute constant strings/layouts, no per-frame object allocation
     """
@@ -3172,34 +3213,34 @@ def show_ssvep_rt_phase(
         dim_opacity=rt_cfg.dim_opacity,
     )
 
-    # ── Pre-loop setup (do NOT put blocking calls inside the render loop) ──
+    # ── 循环前设置（不要将阻塞调用放入渲染循环中）──
     feedback_display.ensure_connected(timeout=0.1)
 
-    # Pre-compute strings that are constant for this phase
+    # 预计算本阶段常量字符串
     _title = phase.title
     _target_side = phase.ssvep_target_side
     _target_freq_hz = phase.ssvep_target_freq_hz
 
-    # ── GC OFF during tight render loop ──
-    # Python GC can pause 10-50ms, fatal in a 16.67ms frame budget.
+    # ── 紧密渲染循环期间关闭 GC ──
+    # Python GC 可能暂停 10-50ms，在 16.67ms 帧预算中致命。
     import gc as _gc
     _gc_was_enabled = _gc.isenabled()
     if _gc_was_enabled:
         _gc.disable()
 
-    # ── Disable per-frame interval recording for tighter loop ──
+    # ── 为更紧密的循环禁用每帧间隔记录 ──
     _was_recording_intervals = ui.win.recordFrameIntervals
     ui.win.recordFrameIntervals = False
 
     frame_index = 0
     timer = core.Clock()
 
-    # Single combined key-list: hotkeys + escape in ONE OS poll
+    # 单次组合按键列表：热键 + escape 在一次 OS 轮询中完成
     _ALL_KEYS = ["f11", "1", "2", "3", "escape"]
 
     try:
         while timer.getTime() < phase.duration_s:
-            # ── One event-poll per frame (was two) ──
+            # ── 每帧一次事件轮询（原来是两次）──
             keys = event.getKeys(keyList=_ALL_KEYS)
             if keys:
                 for key in keys:
@@ -3215,7 +3256,7 @@ def show_ssvep_rt_phase(
 
             elapsed_time_s = timer.getTime()
 
-            # Draw SSVEP frame (reuse existing rendering logic)
+            # 绘制 SSVEP 帧（复用现有渲染逻辑）
             ui.draw_ssvep_frame(
                 ssvep_for_drawing,
                 elapsed_time_s=elapsed_time_s,
@@ -3224,7 +3265,7 @@ def show_ssvep_rt_phase(
                 target_freq_hz=_target_freq_hz,
             )
 
-            # Draw classification feedback text (non-blocking pull only)
+            # 绘制分类反馈文本（仅非阻塞拉取）
             feedback_text = feedback_display.get_feedback_text()
             if feedback_text:
                 ui._draw_cached_text(
@@ -3253,7 +3294,7 @@ def show_ssvep_rt_phase(
     }
 
 
-
+# 双侧 cue 画面 + 目标环
 def show_dual_cue_phase(
     ui: SessionUI,
     phase: PhaseSpec,
@@ -3302,7 +3343,7 @@ def show_dual_cue_phase(
 
 @dataclass(frozen=True)
 class _P300FlashEvent:
-    """A single P300 flash event in the pre-generated sequence."""
+    """预生成序列中的单个 P300 闪烁事件。"""
     flash_index: int
     onset_s: float
     offset_s: float
@@ -3312,6 +3353,7 @@ class _P300FlashEvent:
     marker_value: int
 
 
+# 等间距目标分布 + 随机起始相位保证 oddball 意外性
 def generate_p300_flash_sequence(
     *,
     duration_s: float,
@@ -3321,35 +3363,33 @@ def generate_p300_flash_sequence(
     target_probability: float,
     seed: int,
 ) -> tuple[_P300FlashEvent, ...]:
-    """Pre-generate P300 flash event sequence.
+    """预生成 P300 闪烁事件序列。
 
-    Uses equidistant placement with random start phase: targets are evenly
-    spaced across the sequence with guaranteed minimum gap, while the start
-    position is randomized to maintain unpredictability.
+    使用等间距放置和随机起始相位：目标在序列中均匀分布，
+    具有保证的最小间隔，同时起始位置随机化以保持不可预测性。
 
-    Target-side flashes are attended oddballs; the opposite side is the
-    non-target standard.
+    目标侧闪烁是受关注的 oddball；另一侧是非目标标准。
     """
     rng = random.Random(seed)
     n_flashes = max(1, int(duration_s / soa_s))
     n_target = round(n_flashes * target_probability)
-    n_target = max(0, min(n_target, n_flashes))  # clamp to valid range
+    n_target = max(0, min(n_target, n_flashes))  # 限制到有效范围
     nontarget_side = "right" if target_side == "left" else "left"
 
-    # Equidistant placement with random start phase:
-    # - interval = n_flashes / n_target (exact spacing)
+    # 等间距放置，随机起始相位：
+    # - interval = n_flashes / n_target（精确间隔）
     # - start_offset = random(0, interval-1)
     # - targets at: [start_offset + i*interval for i in range(n_target)]
-    # This guarantees minimum gap = interval - 1 between adjacent targets.
+    # 这保证了相邻目标之间的最小间隔 = interval - 1。
     target_indices: set[int] = set()
     if n_target > 0 and n_flashes > 0:
         interval = n_flashes / n_target
-        # Random start phase: anywhere from 0 to just before the first interval ends
+        # 随机起始相位：从 0 到第一个间隔结束前任意位置
         max_start = min(int(interval), n_flashes - n_target + 1)
         start_offset = rng.randint(0, max(0, max_start - 1))
         for i in range(n_target):
             pos = int(start_offset + i * interval)
-            pos = min(pos, n_flashes - 1)  # clamp to valid range
+            pos = min(pos, n_flashes - 1)  # 限制到有效范围
             target_indices.add(pos)
 
     sequence = []
@@ -3368,6 +3408,7 @@ def generate_p300_flash_sequence(
     return tuple(sequence)
 
 
+# 预生成闪烁序列扫描 + marker 在 onset 时刻发送
 def show_p300_phase(
     ui: SessionUI,
     phase: PhaseSpec,
@@ -3411,14 +3452,14 @@ def show_p300_phase(
 
         current_time = timer.getTime()
 
-        # Determine which side is currently flashing
+        # 确定当前哪侧正在闪烁
         flashing_side: str | None = None
         for flash in flash_sequence[next_flash_idx:min(next_flash_idx + 2, len(flash_sequence))]:
             if flash.onset_s <= current_time < flash.offset_s:
                 flashing_side = flash.side
                 break
 
-        # Send markers at flash onsets
+        # 在闪烁 onset 时刻发送 markers
         while (next_flash_idx < len(flash_sequence)
                and flash_sequence[next_flash_idx].onset_s <= current_time):
             flash = flash_sequence[next_flash_idx]
@@ -3457,22 +3498,21 @@ def show_p300_phase(
 
 
 
+# 优先复用预加载视频（seek + play），无预加载时才创建新 MovieStim
 def show_video_phase(
     ui: SessionUI,
     phase: PhaseSpec,
     on_flip: Callable[[], None] | None = None,
 ) -> None:
-    """Play an MP4 video clip for the duration of the phase.
+    """播放 MP4 视频剪辑，持续相位时长。
 
-    The video is seeked to ``phase.video_start_s`` and played for
-    ``phase.duration_s`` seconds.  When ``phase.video_flip_horizontal``
-    is True the video is mirrored (used for the right-hand condition
-    since the source video only contains a left hand).
+    视频寻址到 phase.video_start_s 并播放 phase.duration_s 秒。
+    当 phase.video_flip_horizontal 为 True 时视频镜像（用于右手条件，
+    因为源视频只包含左手）。
 
-    If a pre-loaded AO video is available in ``ui._ao_video_pool``,
-    it is reused (seek + play) instead of creating a new ``MovieStim``.
-    This eliminates the multi-second blocking delay caused by
-    ``MovieStim`` initialisation on each trial.
+    如果 ui._ao_video_pool 中有预加载的 AO 视频，
+    则复用（seek + play）而不是创建新的 MovieStim。
+    这消除了每次 trial 创建 MovieStim 造成的数秒阻塞延迟。
     """
     video_path = phase.video_path
     if not video_path or not video_path.exists():
@@ -3490,12 +3530,12 @@ def show_video_phase(
         )
         return
 
-    # Try to use a pre-loaded video from the session pool.
+    # 尝试使用会话池中的预加载视频。
     movie = ui.get_ao_video(phase.video_flip_horizontal)
     is_preloaded = movie is not None
 
     if not is_preloaded:
-        # No pre-loaded video available; fall back to creating a new one.
+        # 没有预加载的视频；回退到创建新的。
         try:
             movie = visual.MovieStim(
                 ui.win,
@@ -3506,7 +3546,7 @@ def show_video_phase(
                 volume=0,
             )
         except Exception:
-            # Fall back to static image if video cannot be loaded.
+            # 如果视频无法加载，回退到静态图像。
             show_timed_text_phase(
                 ui,
                 title=phase.title,
@@ -3521,16 +3561,16 @@ def show_video_phase(
             )
             return
 
-        # Scale video to match the same target height as static images.
+        # 缩放视频以匹配静态图像的相同目标高度。
         target_height = ui.stimuli.image_height * phase.image_scale
         native_size = movie.size
         if native_size[1] > 0:
             aspect_ratio = native_size[0] / native_size[1]
         else:
-            aspect_ratio = 16 / 9  # fallback for 1280x720 video
+            aspect_ratio = 16 / 9  # 1280x720 视频的回退
         movie.size = (target_height * aspect_ratio, target_height)
 
-    # Seek to the desired start position.
+    # 寻址到期望的起始位置。
     movie.pause()
     movie.seek(phase.video_start_s)
 
@@ -3544,7 +3584,7 @@ def show_video_phase(
             movie.pause()
             raise ExperimentAbort()
 
-        # Draw text overlay (title, body, footer) without static image.
+        # 绘制文本叠加层（标题、正文、页脚），无静态图像。
         ui.draw_text_screen(
             phase.title,
             phase.body,
@@ -3555,7 +3595,7 @@ def show_video_phase(
             layout=phase.layout,
         )
 
-        # Draw video frame on top of the text screen.
+        # 在文本屏幕之上绘制视频帧。
         movie.draw()
 
         if first_flip and on_flip is not None:
@@ -3564,9 +3604,8 @@ def show_video_phase(
 
         ui.win.flip()
 
-    # Pause the video.  Only unload if it was NOT pre-loaded –
-    # pre-loaded videos are reused across trials and released at
-    # session end via release_ao_videos().
+    # 暂停视频。仅当视频不是预加载的时才卸载 —
+    # 预加载的视频跨 trial 复用，在 session 结束时通过 release_ao_videos() 释放。
     movie.pause()
     if not is_preloaded:
         try:
@@ -3575,6 +3614,7 @@ def show_video_phase(
             pass
 
 
+# 根据 trial_type 构建 PhaseSpec 列表
 def build_trial_phases(trial: Trial, config: ExperimentConfig) -> list[PhaseSpec]:
     if trial.trial_type == "mi_ssvep_serial":
         phases = [
@@ -3644,8 +3684,8 @@ def build_trial_phases(trial: Trial, config: ExperimentConfig) -> list[PhaseSpec
             ),
         ]
     elif trial.trial_type == "mi_ssvep_rt":
-        # mi_ssvep_rt mirrors mi_ssvep but uses rt_ssvep markers (181/182/189)
-        # and includes classification feedback display
+        # mi_ssvep_rt 与 mi_ssvep 类似，但使用 rt_ssvep markers（181/182/189）
+        # 并包含分类反馈显示
         rt_cfg = config.ssvep_rt
         phases = [
             PhaseSpec(
@@ -3888,7 +3928,7 @@ def build_trial_phases(trial: Trial, config: ExperimentConfig) -> list[PhaseSpec
                 ]
             )
 
-    # ITI phase — use rt_task_off marker for mi_ssvep_rt paradigm
+    # ITI 阶段 — mi_ssvep_rt 范式使用 rt_task_off marker
     iti_marker_name = "rt_task_off" if trial.trial_type == "mi_ssvep_rt" else "task_off"
     iti_marker_value = MARKERS[iti_marker_name]
     phases.append(
@@ -3914,6 +3954,7 @@ def resolve_center_drawer(ui: SessionUI, center_mode: str) -> Callable[[], None]
     return None
 
 
+# on_flip 回调通过 partial 绑定 marker 参数 + screen_kind 分发
 def run_phase(
     ui: SessionUI,
     trial: Trial,
@@ -3982,6 +4023,7 @@ def run_phase(
             on_flip=on_flip,
         )
     elif phase.screen_kind == "mi_ssvep":
+        # SSVEP stats: 记录 rendered_frames / elapsed_s / freq_hz 用于帧率分析
         stats = show_ssvep_phase(ui, phase, config.ssvep, on_flip=on_flip)
         stats_note = (
             f"rendered_frames={int(stats['rendered_frames'])}; "
@@ -4003,8 +4045,9 @@ def run_phase(
         )
         phase_end_note = f"{phase.note}; {stats_note}"
     elif phase.screen_kind == "mi_ssvep_rt":
-        # Use feedback_display if available, otherwise create a dummy
+        # 使用 feedback_display（如果可用），否则创建 dummy
         fb = feedback_display if feedback_display is not None else ClassificationFeedbackDisplay()
+        fb.clear()
         stats = show_ssvep_rt_phase(ui, phase, config.ssvep_rt, fb, on_flip=on_flip)
         stats_note = (
             f"rendered_frames={int(stats['rendered_frames'])}; "
@@ -4118,6 +4161,7 @@ def run_phase(
     )
 
 
+# Trial 生命周期：trial_start → phase 循环 → trial_end
 def run_trial(
     ui: SessionUI,
     trial: Trial,
@@ -4154,6 +4198,7 @@ def run_trial(
     )
 
 
+# ⚠ 总控流程：窗口→校准→录制→block/trial 循环→停止录制→帧诊断
 def run_session(config: ExperimentConfig) -> int:
     blocks = build_blocks(config)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -4163,11 +4208,11 @@ def run_session(config: ExperimentConfig) -> int:
     json_path = run_dir / f"{base_name}_plan.json"
     write_session_plan(config, blocks, json_path)
 
-    # Publish experiment metadata via LSL stream + write backup JSON
+    # 通过 LSL 流发布实验元数据 + 写入备份 JSON
     publish_experiment_metadata(config)
     write_session_config_json(config, run_dir)
 
-    # ── Check LSL streams before starting recording ──
+    # ── 在开始录制前检查 LSL 流 ──
     lsl_check = _check_lsl_streams(config.labrecorder.stream_queries)
     print(f"LSL 流检测: {lsl_check['message']}")
     for result in lsl_check["results"]:
@@ -4181,7 +4226,7 @@ def run_session(config: ExperimentConfig) -> int:
     recording_format = config.labrecorder.recording_format
     print(f"录制格式: {recording_format} (marker_mode={config.labrecorder.csv_marker_mode})")
 
-    # ── Start LabRecorderCLI for automatic XDF recording ──
+    # ── 启动 LabRecorderCLI 进行自动 XDF 录制 ──
     lr = LabRecorderCLIController(config.labrecorder)
     xdf_path = ""
     if config.labrecorder.auto_record and recording_format in ("xdf", "both"):
@@ -4197,12 +4242,12 @@ def run_session(config: ExperimentConfig) -> int:
             print(f"WARNING: LabRecorderCLI 启动失败: {exc}")
             print("将不录制 XDF 文件。如需录制，请手动启动 LabRecorder。")
 
-    # ── Start LslCsvRecorder for CSV recording ──
+    # ── 启动 LslCsvRecorder 进行 CSV 录制 ──
     csv_recorder: LslCsvRecorder | None = None
     raw_csv_path = ""
     if config.labrecorder.auto_record and recording_format in ("csv", "both"):
-        # Build CSV path in the same directory structure as XDF
-        # Resolve the path template but replace .xdf with .csv
+        # 在与 XDF 相同的目录结构中构建 CSV 路径
+        # 解析路径模板但将 .xdf 替换为 .csv
         from datetime import datetime
         csv_path_template = config.labrecorder.path_template
         csv_path_str = config.labrecorder.study_root.rstrip("/")
@@ -4213,9 +4258,9 @@ def run_session(config: ExperimentConfig) -> int:
         csv_path_str = csv_path_str.replace("%n", str(config.run))
         csv_path_str = csv_path_str.replace("%d", datetime.now().strftime("%m%d"))
         csv_path_str = csv_path_str.replace(".xdf", ".csv")
-        # Legacy naming: mi + timestamp
+        # 传统命名：mi + 时间戳
         legacy_csv_name = f"mi{datetime.now().strftime('%Y%m%d%H%M%S')}.csv"
-        # Place in the same directory as the XDF would go
+        # 放置在与 XDF 相同的目录中
         raw_csv_path = csv_path_str
         try:
             csv_recorder = LslCsvRecorder(
@@ -4235,16 +4280,17 @@ def run_session(config: ExperimentConfig) -> int:
     ui = SessionUI(win, config.stimuli, config.display)
     ui.win.mouseVisible = False
 
-    # ── Enable per-frame timing diagnostics ──
+    # ── 启用每帧计时诊断 ──
     win.recordFrameIntervals = True
     win.refreshThreshold = 1.0 / max(config.display.refresh_rate_hz, 1e-6) + 0.004
 
-    # ── Calibrate actual refresh rate ──
+    # ── 校准实际刷新率 ──
     measured_hz = calibrate_refresh_rate(win)
     config_hz = config.display.refresh_rate_hz
     hz_deviation_pct = abs(measured_hz - config_hz) / max(config_hz, 1e-6) * 100.0
     print(f"Refresh rate: configured={config_hz:.1f} Hz, measured={measured_hz:.1f} Hz, "
           f"deviation={hz_deviation_pct:.1f}%")
+    # 实际刷新率偏离 >5% 时警告 VSync 可能未生效
     if hz_deviation_pct > 5.0:
         print(
             f"INFO: measured refresh rate ({measured_hz:.1f} Hz) deviates >5% from "
@@ -4253,17 +4299,17 @@ def run_session(config: ExperimentConfig) -> int:
             f"(time-driven sinusoidal), but frame drops will reduce visual quality."
         )
 
-    # Update ui.display with measured refresh rate for FPS diagnostics
+    # 为 FPS 诊断用测量值更新 ui.display
     ui.display = replace(ui.display, refresh_rate_hz=measured_hz)
 
-    # With time-driven sinusoidal flicker, the actual SSVEP frequency
-    # equals the configured frequency regardless of frame rate.
+    # 使用时间驱动正弦 flicker，实际 SSVEP 频率
+    # 等于配置频率，与帧率无关。
     predicted_left_hz = config.ssvep.left_freq_hz
     predicted_right_hz = config.ssvep.right_freq_hz
 
-    # Pre-load AO videos if the session uses ao_mi trials, so that
-    # show_video_phase() can reuse them instead of blocking on every
-    # trial to create a new MovieStim.
+    # 如果 session 使用 ao_mi trial，预加载 AO 视频，
+    # 以便 show_video_phase() 可以复用它们，而不是在每个
+    # trial 上阻塞创建新的 MovieStim。
     if "ao_mi" in get_active_trial_types(config.session_cfg):
         ui.preload_ao_videos(
             config.stimuli.ao_video_path,
@@ -4271,7 +4317,7 @@ def run_session(config: ExperimentConfig) -> int:
             config.stimuli.task_image_scale,
         )
 
-    # ── Start classifier subprocess and connect feedback display for mi_ssvep_rt ──
+    # ── 启动分类器子进程并连接 mi_ssvep_rt 的反馈显示 ──
     classifier_manager: RTClassifierManager | None = None
     feedback_display: ClassificationFeedbackDisplay | None = None
     if config.session_cfg.trial_mode == "mi_ssvep_rt":
@@ -4298,7 +4344,7 @@ def run_session(config: ExperimentConfig) -> int:
         lr_status_parts.append(f"CSV [{'OK' if csv_recorder and csv_recorder.is_recording else 'OFF'}] {raw_csv_path}" if csv_recorder and csv_recorder.is_recording else "CSV [OFF] not recording")
     lr_status = " | ".join(lr_status_parts) if lr_status_parts else "Recording [OFF]"
 
-    # Build refresh rate status line for display
+    # 构建刷新率状态行用于显示
     if hz_deviation_pct > 2.0:
         refresh_status = (
             f"Refresh: {measured_hz:.1f} Hz (config: {config_hz:.1f} Hz, "
@@ -4307,7 +4353,7 @@ def run_session(config: ExperimentConfig) -> int:
     else:
         refresh_status = f"Refresh: {measured_hz:.1f} Hz"
 
-    # Build SSVEP frequency status line
+    # 构建 SSVEP 频率状态行
     ssvep_freq_status = (
         f"SSVEP: L {config.ssvep.left_freq_hz:.1f} Hz / R {config.ssvep.right_freq_hz:.1f} Hz"
     )
@@ -4337,13 +4383,13 @@ def run_session(config: ExperimentConfig) -> int:
         active_conditions = get_active_conditions(config.session_cfg)
         active_trial_types = get_active_trial_types(config.session_cfg)
 
-        # Build LSL status line for display
+        # 构建 LSL 状态行用于显示
         lsl_status_line = lsl_check["message"]
         if not lsl_check["all_found"]:
             missing = [r["query"] for r in lsl_check["results"] if not r["found"]]
             lsl_status_line = f"[!] LSL missing: {', '.join(missing)}"
 
-        # Build paradigm-specific info lines
+        # 构建范式特定信息行
         paradigm_info_lines = []
         trial_mode = config.session_cfg.trial_mode
         if trial_mode == "mi_ssvep":
@@ -4405,14 +4451,14 @@ def run_session(config: ExperimentConfig) -> int:
             logger.log_event("block_start", block_index=block_index)
 
             for trial in block:
-                # Check recording status before each trial
+                # 在每个 trial 前检查录制状态
                 if config.labrecorder.auto_record and lr.is_recording and recording_format in ("xdf", "both"):
                     is_ok, error_msg = lr.check_recording_status()
                     if not is_ok:
-                        # Recording lost - warn user
+                        # 录制丢失 — 警告用户
                         warn_redraw = show_text_screen(
                             ui,
-                            title="⚠️ Recording Lost",
+                            title="Recording Lost",
                             body=(
                                 f"LabRecorderCLI has stopped unexpectedly!\n\n"
                                 f"{error_msg}\n\n"
@@ -4427,7 +4473,7 @@ def run_session(config: ExperimentConfig) -> int:
                         )
                         if choice == "space":
                             raise ExperimentAbort("Recording lost - user chose to abort")
-                        # User chose to continue without recording
+                        # 用户选择继续而不录制
                         logger.log_event(
                             "recording_lost",
                             block_index=trial.block_index,
@@ -4445,8 +4491,8 @@ def run_session(config: ExperimentConfig) -> int:
             )
             logger.log_event("block_end", block_index=block_index)
 
-            # Clear image caches between blocks to prevent GPU texture
-            # memory buildup (especially from animation frame sequences).
+            # 清除 block 间的图片缓存以防止 GPU 纹理
+            # 内存堆积（尤其是动画帧序列）。
             ui._image_stim_cache.clear()
             ui._image_draw_size_cache.clear()
 
@@ -4464,14 +4510,14 @@ def run_session(config: ExperimentConfig) -> int:
         sender.send(MARKERS["session_end"], "session_end", note="session complete")
         logger.log_event("session_end", note="session complete")
 
-        # Stop LabRecorderCLI — XDF file is finalized
+        # 停止 LabRecorderCLI — XDF 文件已完成
         lr.stop_recording()
 
-        # Stop CSV recorder — CSV file is finalized
+        # 停止 CSV 录制器 — CSV 文件已完成
         if csv_recorder is not None:
             csv_recorder.stop_recording()
 
-        # Check if XDF file actually has data
+        # 检查 XDF 文件是否实际有数据
         xdf_ok = xdf_path and Path(xdf_path).exists() and Path(xdf_path).stat().st_size > 0
         if xdf_ok:
             xdf_msg = f"XDF saved to: {xdf_path}"
@@ -4480,7 +4526,7 @@ def run_session(config: ExperimentConfig) -> int:
         else:
             xdf_msg = "No XDF was recorded (LabRecorderCLI not started)."
 
-        # Check if CSV file actually has data
+        # 检查 CSV 文件是否实际有数据
         csv_ok = raw_csv_path and Path(raw_csv_path).exists() and Path(raw_csv_path).stat().st_size > 0
         csv_samples = csv_recorder.samples_written if csv_recorder is not None else 0
         if csv_ok:
@@ -4490,7 +4536,7 @@ def run_session(config: ExperimentConfig) -> int:
         else:
             csv_msg = ""
 
-        # Build combined recording status message
+        # 构建组合录制状态消息
         recording_msgs = []
         if recording_format in ("xdf", "both"):
             recording_msgs.append(xdf_msg)
@@ -4514,12 +4560,12 @@ def run_session(config: ExperimentConfig) -> int:
 
     except ExperimentAbort:
         logger.log_event("session_aborted", note="ESC pressed by operator")
-        # Stop LabRecorderCLI on ESC — XDF file is saved up to this point
+        # ESC 时停止 LabRecorderCLI — XDF 文件保存到此点为止
         lr.stop_recording()
-        # Stop CSV recorder on ESC — CSV file is saved up to this point
+        # ESC 时停止 CSV 录制器 — CSV 文件保存到此点为止
         if csv_recorder is not None:
             csv_recorder.stop_recording()
-        # Check if XDF file actually has data
+        # 检查 XDF 文件是否实际有数据
         xdf_ok = xdf_path and Path(xdf_path).exists() and Path(xdf_path).stat().st_size > 0
         if xdf_ok:
             xdf_msg = (
@@ -4535,7 +4581,7 @@ def run_session(config: ExperimentConfig) -> int:
         else:
             xdf_msg = "Check the local CSV log and decide whether the data should be discarded."
 
-        # Check if raw CSV file actually has data
+        # 检查原始 CSV 文件是否实际有数据
         csv_ok = raw_csv_path and Path(raw_csv_path).exists() and Path(raw_csv_path).stat().st_size > 0
         csv_msg = ""
         if csv_ok and csv_recorder is not None:
@@ -4559,7 +4605,7 @@ def run_session(config: ExperimentConfig) -> int:
         return 1
 
     finally:
-        # ── Print frame-interval diagnostics ──
+        # ── 输出帧间隔统计（均值/标准差/丢帧数）──
         try:
             fi = win.frameIntervals
             if fi:
@@ -4587,18 +4633,18 @@ def run_session(config: ExperimentConfig) -> int:
                 )
         except Exception:
             pass
-        # Ensure classifier subprocess is stopped regardless of exit path
+        # 确保分类器子进程无论退出路径如何都已停止
         try:
             if classifier_manager is not None:
                 classifier_manager.stop()
         except Exception:
             pass
-        # Ensure LabRecorderCLI is stopped regardless of exit path
+        # 确保 LabRecorderCLI 无论退出路径如何都已停止
         try:
             lr.stop_recording()
         except Exception:
             pass
-        # Ensure CSV recorder is stopped regardless of exit path
+        # 确保 CSV 录制器无论退出路径如何都已停止
         try:
             if csv_recorder is not None:
                 csv_recorder.stop_recording()
@@ -4631,22 +4677,22 @@ _LAST_SESSION_FILE = Path(__file__).resolve().parent / ".last_session.json"
 
 
 def _detect_monitors() -> list[dict[str, Any]]:
-    """Detect connected monitors with refresh rates.
+    """检测连接的显示器及其刷新率。
 
-    Uses Pyglet (PsychoPy's backend) to enumerate screens, ensuring
-    the screen indices match PsychoPy's Window(screen=...) parameter.
+    使用 Pyglet（PsychoPy 的后端）枚举屏幕，确保
+    屏幕索引与 PsychoPy 的 Window(screen=...) 参数匹配。
 
-    Returns a list of dicts with keys: index, label, refresh_rate, is_primary.
-    Falls back to a single 60 Hz monitor on error.
+    返回包含以下键的字典列表：index, label, refresh_rate, is_primary。
+    出错时回退到单个 60 Hz 显示器。
     """
     monitors: list[dict[str, Any]] = []
     try:
-        # Use Pyglet directly - this ensures screen indices match PsychoPy's
+        # 直接使用 Pyglet — 这确保屏幕索引与 PsychoPy 匹配
         from pyglet.canvas import get_display
         pyglet_display = get_display()
         pyglet_screens = pyglet_display.get_screens()
 
-        # Try to determine primary screen (usually the one at origin 0,0)
+        # 尝试确定主屏幕（通常位于原点 0,0）
         primary_idx = 0
         for i, scr in enumerate(pyglet_screens):
             if scr.x == 0 and scr.y == 0:
@@ -4654,7 +4700,7 @@ def _detect_monitors() -> list[dict[str, Any]]:
                 break
 
         for idx, scr in enumerate(pyglet_screens):
-            # Get refresh rate if available
+            # 获取刷新率（如果可用）
             refresh = 60
             try:
                 mode = scr.get_mode()
@@ -4690,20 +4736,20 @@ def _detect_monitors() -> list[dict[str, Any]]:
 
 
 def _check_lsl_streams(stream_queries: Sequence[str], timeout: float = 2.0) -> dict[str, Any]:
-    """Check if required LSL streams are available.
+    """检查所需的 LSL 流是否可用。
 
-    Resolves by stream NAME for fast, unambiguous matching.
-    OpenBCI GUI defaults: obci_eeg1 (EEG), obci_eeg2 (Marker).
+    按流 NAME 解析以进行快速、明确的匹配。
+    OpenBCI GUI 默认值：obci_eeg1 (EEG), obci_eeg2 (Marker)。
 
     Args:
-        stream_queries: List of name queries (e.g., ['name="obci_eeg1"', 'name="obci_eeg2"'])
-        timeout: Timeout in seconds for LSL resolve
+        stream_queries: 名称查询列表（例如 ['name="obci_eeg1"', 'name="obci_eeg2"']）
+        timeout: LSL 解析超时时间（秒）
 
     Returns:
-        Dict with keys:
-        - 'all_found': bool, True if all streams were found
-        - 'results': list of dicts with 'query', 'found', 'stream_info' for each query
-        - 'message': str, human-readable status message
+        包含以下键的字典：
+        - 'all_found': bool，如果所有流都找到则为 True
+        - 'results': 每个查询的 dict 列表，包含 'query', 'found', 'stream_info'
+        - 'message': str，人类可读的状态消息
     """
     if pylsl is None:
         return {
@@ -4722,7 +4768,7 @@ def _check_lsl_streams(stream_queries: Sequence[str], timeout: float = 2.0) -> d
             found = False
             matched_info: dict[str, Any] = {}
 
-            # Parse query: support 'name="obci_eeg1"' or 'type="EEG"'
+            # 解析查询：支持 'name="obci_eeg1"' 或 'type="EEG"'
             if "name=" in query:
                 match = re.search(r'name="([^"]+)"', query)
                 if match:
@@ -4768,7 +4814,7 @@ def _check_lsl_streams(stream_queries: Sequence[str], timeout: float = 2.0) -> d
             "message": f"LSL 检测出错: {exc}",
         }
 
-    # Build human-readable message
+    # 构建人类可读消息
     if all_found:
         message = f"[OK] LSL streams detected ({len(results)} streams)"
     else:
@@ -4783,11 +4829,11 @@ def _check_lsl_streams(stream_queries: Sequence[str], timeout: float = 2.0) -> d
 
 
 def _load_dialog_defaults(args: argparse.Namespace) -> dict[str, Any]:
-    """Load dialog defaults: YAML config + last session file + CLI args.
+    """加载对话框默认值：YAML 配置 + 上次 session 文件 + CLI 参数。
 
-    Priority: CLI explicit overrides > saved last session > YAML defaults.
+    优先级：CLI 显式覆盖 > 保存的上次 session > YAML 默认值。
     """
-    # 1. YAML defaults
+    # 1. YAML 默认值
     script_dir = Path(__file__).resolve().parent
     yaml_dict = load_yaml_config(script_dir / "config_default.yaml")
     flat = _flatten_yaml(yaml_dict)
@@ -4848,8 +4894,9 @@ def _load_dialog_defaults(args: argparse.Namespace) -> dict[str, Any]:
         "ssvep_rt_flicker_mode": flat.get("ssvep_rt_flicker_mode", "border"),
         "ssvep_rt_waveform": flat.get("ssvep_rt_waveform", "square"),
         "ssvep_rt_display_mode": flat.get("ssvep_rt_display_mode", "single_side"),
+        "ssvep_rt_enable_diag": flat.get("ssvep_rt_enable_diag", False),
     }
-    # 2. Override with saved values
+    # 2. 用保存的值覆盖
     if _LAST_SESSION_FILE.exists():
         try:
             saved = json.loads(_LAST_SESSION_FILE.read_text(encoding="utf-8"))
@@ -4858,7 +4905,7 @@ def _load_dialog_defaults(args: argparse.Namespace) -> dict[str, Any]:
                     defaults[key] = saved[key]
         except (json.JSONDecodeError, OSError):
             pass
-    # 3. CLI explicit overrides (non-None values from CLI)
+    # 3. CLI 显式覆盖（来自 CLI 的非 None 值）
     if args.study_root is not None:
         defaults["study_root"] = args.study_root
     if args.refresh_rate is not None:
@@ -4867,34 +4914,35 @@ def _load_dialog_defaults(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _save_last_session(**kwargs: Any) -> None:
-    """Save dialog values for next session pre-fill."""
+    """保存对话框值用于下次 session 预填充。"""
     try:
         _LAST_SESSION_FILE.write_text(
             json.dumps(kwargs, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
     except OSError:
-        pass  # non-critical, silent fail
+        pass  # 非关键的，静默失败
 
 
+# tkinter 对话框：通用设置 + 范式专属面板根据 trial_mode 显隐切换
 def show_session_dialog(args: argparse.Namespace,
                         defaults: dict[str, Any]) -> argparse.Namespace | None:
-    """Show a tkinter dialog for session parameters before the experiment starts.
+    """显示实验开始前的 session 参数 tkinter 对话框。
 
-    Pre-fills fields from *defaults* (YAML + last session + CLI overrides).
-    Returns the (possibly modified) Namespace, or ``None`` if the user cancels.
+    从 defaults（YAML + 上次 session + CLI 覆盖）预填充字段。
+    返回（可能修改后的）Namespace，如果用户取消则返回 None。
     """
     result: dict[str, Any] = {}
     cancelled = [False]
 
-    # Detect monitors
+    # 检测显示器
     monitors = _detect_monitors()
 
     root = tk.Tk()
     root.title("MI 实验参数设置")
-    root.resizable(True, True)  # Allow resizing
+    root.resizable(True, True)  # 允许调整大小
 
-    # Center on screen
+    # 居中于屏幕
     root.update_idletasks()
     w, h = 580, 720
     x = (root.winfo_screenwidth() - w) // 2
@@ -4907,7 +4955,7 @@ def show_session_dialog(args: argparse.Namespace,
     row = 0
     entries: dict[str, ttk.Entry] = {}
 
-    # ── Study root with Browse button ──
+    # ── 数据根目录与浏览按钮 ──
     ttk.Label(main_frame, text="数据根目录").grid(row=row, column=0, sticky="w", pady=4)
     study_root_var = tk.StringVar(value=str(defaults.get("study_root", "")))
     study_root_entry = ttk.Entry(main_frame, textvariable=study_root_var, width=30)
@@ -4925,7 +4973,7 @@ def show_session_dialog(args: argparse.Namespace,
     browse_btn.grid(row=row, column=2, padx=(5, 0), pady=4)
     row += 1
 
-    # ── Recording format dropdown ──
+    # ── 录制格式下拉框 ──
     ttk.Label(main_frame, text="录制格式").grid(row=row, column=0, sticky="w", pady=4)
     recording_format_var = tk.StringVar(value=str(defaults.get("recording_format", "xdf")))
     recording_format_combo = ttk.Combobox(
@@ -4937,7 +4985,7 @@ def show_session_dialog(args: argparse.Namespace,
     recording_format_hint.grid(row=row, column=2, sticky="w", pady=4, padx=(5, 0))
     row += 1
 
-    # ── CSV marker mode dropdown (only visible when format is csv or both) ──
+    # ── CSV marker 模式下拉框（仅 format 为 csv 或 both 时可见）──
     csv_marker_mode_label = ttk.Label(main_frame, text="CSV Marker 模式")
     csv_marker_mode_label.grid(row=row, column=0, sticky="w", pady=4)
     csv_marker_mode_var = tk.StringVar(value=str(defaults.get("csv_marker_mode", "legacy")))
@@ -4950,7 +4998,7 @@ def show_session_dialog(args: argparse.Namespace,
     csv_marker_mode_hint.grid(row=row, column=2, sticky="w", pady=4, padx=(5, 0))
     row += 1
 
-    # Widgets to toggle based on recording format
+    # 根据录制格式切换的部件
     _csv_marker_widgets = [csv_marker_mode_label, csv_marker_mode_combo, csv_marker_mode_hint]
 
     def _toggle_csv_marker_mode(*_args: Any) -> None:
@@ -4962,16 +5010,16 @@ def show_session_dialog(args: argparse.Namespace,
                 w.grid_remove()
 
     recording_format_var.trace_add("write", _toggle_csv_marker_mode)
-    _toggle_csv_marker_mode()  # Set initial state
+    _toggle_csv_marker_mode()  # 设置初始状态
 
-    # ── Text fields ──
+    # ── 文本字段 ──
     fields: list[tuple[str, str, str]] = [
         ("participant", "被试编号 (Participant)", str(defaults.get("participant", "P001"))),
         ("session", "Session 编号", str(defaults.get("session", "S001"))),
         ("run", "Run 编号", str(defaults.get("run", 1))),
     ]
 
-    # Keep StringVar references alive to prevent GC clearing the Entry values
+    # 保持 StringVar 引用活着以防止 GC 清除 Entry 值
     vars_: dict[str, tk.StringVar] = {}
 
     for key, label_text, default in fields:
@@ -4983,7 +5031,7 @@ def show_session_dialog(args: argparse.Namespace,
         entries[key] = entry
         row += 1
 
-    # ── Trial mode dropdown ──
+    # ── Trial mode 下拉框 ──
     ttk.Label(main_frame, text="实验范式 (Trial Mode)").grid(row=row, column=0, sticky="w", pady=4)
     trial_modes = ["pure_mi", "ao_mi", "mi_ssvep", "pure_ssvep", "mi_p300", "mixed", "mi_arrow", "mi_ssvep_arousal", "mi_ssvep_serial", "mi_ssvep_rt"]
     trial_var = tk.StringVar(value=str(defaults.get("trial_mode", "pure_mi")))
@@ -4992,7 +5040,7 @@ def show_session_dialog(args: argparse.Namespace,
     trial_combo.grid(row=row, column=1, columnspan=2, sticky="ew", pady=4, padx=(10, 0))
     row += 1
 
-    # ── Mode dropdown ──
+    # ── Mode 下拉框 ──
     ttk.Label(main_frame, text="模式 (Mode)").grid(row=row, column=0, sticky="w", pady=4)
     modes = ["pilot", "main", "custom"]
     mode_var = tk.StringVar(value=str(defaults.get("mode", "pilot")))
@@ -5001,10 +5049,10 @@ def show_session_dialog(args: argparse.Namespace,
     mode_combo.grid(row=row, column=1, columnspan=2, sticky="ew", pady=4, padx=(10, 0))
     row += 1
 
-    # ── Custom mode settings (visible only when mode == custom) ──
+    # ── 自定义模式设置（仅 mode == custom 时可见）──
     custom_frame = ttk.LabelFrame(main_frame, text="自定义模式设置", padding=8)
     custom_frame.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
-    custom_frame_row = row  # remember the actual grid row for re-showing
+    custom_frame_row = row  # 记住实际网格行以便重新显示
 
     ttk.Label(custom_frame, text="Block 数量").grid(row=0, column=0, sticky="w", pady=2)
     custom_blocks_var = tk.StringVar(value=str(defaults.get("blocks", 2)))
@@ -5018,13 +5066,13 @@ def show_session_dialog(args: argparse.Namespace,
 
     row += 1
 
-    # ── Fullscreen checkbox ──
+    # ── 全屏复选框 ──
     fullscreen_var = tk.BooleanVar(value=bool(defaults.get("fullscreen", True)))
     fullscreen_check = ttk.Checkbutton(main_frame, text="全屏模式 (推荐，确保刷新率正确)", variable=fullscreen_var)
     fullscreen_check.grid(row=row, column=0, columnspan=3, sticky="w", pady=4)
     row += 1
 
-    # ── Class mode dropdown ──
+    # ── 分类模式下拉框 ──
     ttk.Label(main_frame, text="分类模式 (Class Mode)").grid(row=row, column=0, sticky="w", pady=4)
     class_modes = ["binary", "ternary"]
     class_var = tk.StringVar(value=str(defaults.get("class_mode", "binary")))
@@ -5033,10 +5081,10 @@ def show_session_dialog(args: argparse.Namespace,
     class_combo.grid(row=row, column=1, columnspan=2, sticky="ew", pady=4, padx=(10, 0))
     row += 1
 
-    # ── Monitor + Refresh rate (same row) ──
+    # ── 显示器 + 刷新率（同一行）──
     ttk.Label(main_frame, text="显示器").grid(row=row, column=0, sticky="w", pady=4)
     monitor_labels = [m["label"] for m in monitors]
-    # Find default display index
+    # 查找默认 display 索引
     default_display = int(defaults.get("display_index", 0))
     if default_display >= len(monitor_labels):
         default_display = 0
@@ -5045,11 +5093,11 @@ def show_session_dialog(args: argparse.Namespace,
                                  state="readonly", width=17)
     monitor_combo.grid(row=row, column=1, sticky="w", pady=4, padx=(10, 0))
 
-    # Refresh rate entry
+    # 刷新率输入
     refresh_frame = ttk.Frame(main_frame)
     refresh_frame.grid(row=row, column=2, sticky="w", pady=4)
     default_refresh = monitors[default_display]["refresh_rate"]
-    # Use saved refresh_rate if it matches the selected monitor, otherwise use detected
+    # 如果保存的刷新率与所选显示器匹配则使用，否则使用检测到的
     saved_refresh = defaults.get("refresh_rate", default_refresh)
     refresh_var = tk.StringVar(value=str(int(saved_refresh)))
     refresh_entry = ttk.Entry(refresh_frame, textvariable=refresh_var, width=5)
@@ -5063,12 +5111,12 @@ def show_session_dialog(args: argparse.Namespace,
     monitor_combo.bind("<<ComboboxSelected>>", _on_monitor_change)
     row += 1
 
-    # ── SSVEP-specific options (visible only when trial_mode == mi_ssvep) ──
+    # ── SSVEP 特定选项（仅 trial_mode == mi_ssvep 时可见）──
     ssvep_frame = ttk.LabelFrame(main_frame, text="SSVEP 设置", padding=8)
     ssvep_frame.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
     row += 1
 
-    # Flicker mode
+    # 闪烁模式
     ttk.Label(ssvep_frame, text="闪烁模式").grid(row=0, column=0, sticky="w", pady=2)
     flicker_mode_var = tk.StringVar(value=str(defaults.get("ssvep_flicker_mode", "image")))
     flicker_mode_combo = ttk.Combobox(ssvep_frame, textvariable=flicker_mode_var,
@@ -5077,7 +5125,7 @@ def show_session_dialog(args: argparse.Namespace,
     ttk.Label(ssvep_frame, text="(image=图片透明度闪烁, border=边框颜色闪烁)").grid(
         row=0, column=2, sticky="w", pady=2, padx=(5, 0))
 
-    # Waveform
+    # 波形
     ttk.Label(ssvep_frame, text="闪烁波形").grid(row=1, column=0, sticky="w", pady=2)
     waveform_var = tk.StringVar(value=str(defaults.get("ssvep_waveform", "square")))
     waveform_combo = ttk.Combobox(ssvep_frame, textvariable=waveform_var,
@@ -5086,21 +5134,21 @@ def show_session_dialog(args: argparse.Namespace,
     ttk.Label(ssvep_frame, text="(square=方波更强信号, sine=正弦更舒适)").grid(
         row=1, column=2, sticky="w", pady=2, padx=(5, 0))
 
-    # Left frequency
+    # 左手频率
     ttk.Label(ssvep_frame, text="左手频率").grid(row=2, column=0, sticky="w", pady=2)
     left_freq_var = tk.StringVar(value=str(defaults.get("ssvep_left_freq", 10.0)))
     left_freq_entry = ttk.Entry(ssvep_frame, textvariable=left_freq_var, width=8)
     left_freq_entry.grid(row=2, column=1, sticky="w", pady=2, padx=(10, 0))
     ttk.Label(ssvep_frame, text="Hz").grid(row=2, column=2, sticky="w", pady=2)
 
-    # Right frequency
+    # 右手频率
     ttk.Label(ssvep_frame, text="右手频率").grid(row=3, column=0, sticky="w", pady=2)
     right_freq_var = tk.StringVar(value=str(defaults.get("ssvep_right_freq", 15.0)))
     right_freq_entry = ttk.Entry(ssvep_frame, textvariable=right_freq_var, width=8)
     right_freq_entry.grid(row=3, column=1, sticky="w", pady=2, padx=(10, 0))
     ttk.Label(ssvep_frame, text="Hz").grid(row=3, column=2, sticky="w", pady=2)
 
-    # Display mode
+    # 显示模式
     ttk.Label(ssvep_frame, text="显示模式").grid(row=4, column=0, sticky="w", pady=2)
     ssvep_display_mode_var = tk.StringVar(value=str(defaults.get("ssvep_display_mode", "single_side")))
     ssvep_display_mode_combo = ttk.Combobox(ssvep_frame, textvariable=ssvep_display_mode_var,
@@ -5110,12 +5158,12 @@ def show_session_dialog(args: argparse.Namespace,
     ttk.Label(ssvep_frame, text="(single_side=仅目标侧, both_sides=双侧, single_center=居中)").grid(
         row=4, column=2, sticky="w", pady=2, padx=(5, 0))
 
-    # ── P300-specific options (visible only when trial_mode == mi_p300) ──
+    # ── P300 特定选项（仅 trial_mode == mi_p300 时可见）──
     p300_frame = ttk.LabelFrame(main_frame, text="P300 设置", padding=8)
     p300_frame.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
     row += 1
 
-    # P300 Flicker mode
+    # P300 闪烁模式
     ttk.Label(p300_frame, text="闪烁模式").grid(row=0, column=0, sticky="w", pady=2)
     p300_flicker_mode_var = tk.StringVar(value=str(defaults.get("p300_flicker_mode", "image")))
     p300_flicker_mode_combo = ttk.Combobox(p300_frame, textvariable=p300_flicker_mode_var,
@@ -5124,7 +5172,7 @@ def show_session_dialog(args: argparse.Namespace,
     ttk.Label(p300_frame, text="(image=图片透明度闪烁, border=边框颜色闪烁)").grid(
         row=0, column=2, sticky="w", pady=2, padx=(5, 0))
 
-    # P300 Target probability
+    # P300 目标概率
     ttk.Label(p300_frame, text="目标概率").grid(row=1, column=0, sticky="w", pady=2)
     p300_target_prob_var = tk.StringVar(value=str(defaults.get("p300_target_probability", 0.25)))
     p300_target_prob_entry = ttk.Entry(p300_frame, textvariable=p300_target_prob_var, width=8)
@@ -5132,12 +5180,12 @@ def show_session_dialog(args: argparse.Namespace,
     ttk.Label(p300_frame, text="(e.g. 0.25 = 25% 目标侧闪烁，自动保证至少1次)").grid(
         row=1, column=2, sticky="w", pady=2, padx=(5, 0))
 
-    # ── SSVEP Arousal specific options (visible only when trial_mode == mi_ssvep_arousal) ──
+    # ── SSVEP Arousal 特定选项（仅 trial_mode == mi_ssvep_arousal 时可见）──
     ssvep_arousal_frame = ttk.LabelFrame(main_frame, text="SSVEP Arousal 设置", padding=8)
     ssvep_arousal_frame.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
     row += 1
 
-    # Freq mode
+    # 频率模式
     ttk.Label(ssvep_arousal_frame, text="频率模式").grid(row=0, column=0, sticky="w", pady=2)
     ssvep_arousal_freq_mode_var = tk.StringVar(value=str(defaults.get("ssvep_arousal_freq_mode", "fixed")))
     ssvep_arousal_freq_mode_combo = ttk.Combobox(ssvep_arousal_frame, textvariable=ssvep_arousal_freq_mode_var,
@@ -5146,7 +5194,7 @@ def show_session_dialog(args: argparse.Namespace,
     ttk.Label(ssvep_arousal_frame, text="(fixed=固定频率, random=随机频率)").grid(
         row=0, column=2, sticky="w", pady=2, padx=(5, 0))
 
-    # Fixed freq
+    # 固定频率
     ssvep_arousal_fixed_freq_label = ttk.Label(ssvep_arousal_frame, text="固定频率")
     ssvep_arousal_fixed_freq_label.grid(row=1, column=0, sticky="w", pady=2)
     ssvep_arousal_fixed_freq_var = tk.StringVar(value=str(defaults.get("ssvep_arousal_fixed_freq_hz", 20.0)))
@@ -5155,7 +5203,7 @@ def show_session_dialog(args: argparse.Namespace,
     ssvep_arousal_fixed_freq_hz_label = ttk.Label(ssvep_arousal_frame, text="Hz")
     ssvep_arousal_fixed_freq_hz_label.grid(row=1, column=2, sticky="w", pady=2)
 
-    # Freq min
+    # 频率最小值
     ssvep_arousal_freq_min_label = ttk.Label(ssvep_arousal_frame, text="最小频率")
     ssvep_arousal_freq_min_label.grid(row=2, column=0, sticky="w", pady=2)
     ssvep_arousal_freq_min_var = tk.StringVar(value=str(defaults.get("ssvep_arousal_freq_min_hz", 18.0)))
@@ -5164,7 +5212,7 @@ def show_session_dialog(args: argparse.Namespace,
     ssvep_arousal_freq_min_hz_label = ttk.Label(ssvep_arousal_frame, text="Hz")
     ssvep_arousal_freq_min_hz_label.grid(row=2, column=2, sticky="w", pady=2)
 
-    # Freq max
+    # 频率最大值
     ssvep_arousal_freq_max_label = ttk.Label(ssvep_arousal_frame, text="最大频率")
     ssvep_arousal_freq_max_label.grid(row=3, column=0, sticky="w", pady=2)
     ssvep_arousal_freq_max_var = tk.StringVar(value=str(defaults.get("ssvep_arousal_freq_max_hz", 25.0)))
@@ -5173,7 +5221,7 @@ def show_session_dialog(args: argparse.Namespace,
     ssvep_arousal_freq_max_hz_label = ttk.Label(ssvep_arousal_frame, text="Hz")
     ssvep_arousal_freq_max_hz_label.grid(row=3, column=2, sticky="w", pady=2)
 
-    # Waveform
+    # 波形
     ttk.Label(ssvep_arousal_frame, text="闪烁波形").grid(row=4, column=0, sticky="w", pady=2)
     ssvep_arousal_waveform_var = tk.StringVar(value=str(defaults.get("ssvep_arousal_waveform", "sine")))
     ssvep_arousal_waveform_combo = ttk.Combobox(ssvep_arousal_frame, textvariable=ssvep_arousal_waveform_var,
@@ -5182,50 +5230,50 @@ def show_session_dialog(args: argparse.Namespace,
     ttk.Label(ssvep_arousal_frame, text="(square=方波更强信号, sine=正弦更舒适)").grid(
         row=4, column=2, sticky="w", pady=2, padx=(5, 0))
 
-    # Cue style
+    # 提示样式
     ttk.Label(ssvep_arousal_frame, text="提示样式").grid(row=5, column=0, sticky="w", pady=2)
     ssvep_arousal_cue_style_var = tk.StringVar(value=str(defaults.get("ssvep_arousal_cue_style", "arrow")))
     ssvep_arousal_cue_style_combo = ttk.Combobox(ssvep_arousal_frame, textvariable=ssvep_arousal_cue_style_var,
                                                   values=["arrow", "image"], state="readonly", width=10)
     ssvep_arousal_cue_style_combo.grid(row=5, column=1, sticky="w", pady=2, padx=(10, 0))
 
-    # Task style
+    # 任务样式
     ttk.Label(ssvep_arousal_frame, text="任务样式").grid(row=6, column=0, sticky="w", pady=2)
     ssvep_arousal_task_style_var = tk.StringVar(value=str(defaults.get("ssvep_arousal_task_style", "arrow")))
     ssvep_arousal_task_style_combo = ttk.Combobox(ssvep_arousal_frame, textvariable=ssvep_arousal_task_style_var,
                                                    values=["arrow", "image"], state="readonly", width=10)
     ssvep_arousal_task_style_combo.grid(row=6, column=1, sticky="w", pady=2, padx=(10, 0))
 
-    # Stimulus size
+    # 刺激尺寸
     ttk.Label(ssvep_arousal_frame, text="刺激尺寸").grid(row=7, column=0, sticky="w", pady=2)
     ssvep_arousal_stimulus_size_var = tk.StringVar(value=str(defaults.get("ssvep_arousal_stimulus_size", 0.35)))
     ssvep_arousal_stimulus_size_entry = ttk.Entry(ssvep_arousal_frame, textvariable=ssvep_arousal_stimulus_size_var, width=8)
     ssvep_arousal_stimulus_size_entry.grid(row=7, column=1, sticky="w", pady=2, padx=(10, 0))
 
-    # Dim opacity
+    # 透明度
     ttk.Label(ssvep_arousal_frame, text="透明度").grid(row=8, column=0, sticky="w", pady=2)
     ssvep_arousal_dim_opacity_var = tk.StringVar(value=str(defaults.get("ssvep_arousal_dim_opacity", 0.0)))
     ssvep_arousal_dim_opacity_entry = ttk.Entry(ssvep_arousal_frame, textvariable=ssvep_arousal_dim_opacity_var, width=8)
     ssvep_arousal_dim_opacity_entry.grid(row=8, column=1, sticky="w", pady=2, padx=(10, 0))
 
-    # Arrow color
+    # 箭头颜色
     ttk.Label(ssvep_arousal_frame, text="箭头颜色").grid(row=9, column=0, sticky="w", pady=2)
     ssvep_arousal_arrow_color_var = tk.StringVar(value=str(defaults.get("ssvep_arousal_arrow_color", "white")))
     ssvep_arousal_arrow_color_entry = ttk.Entry(ssvep_arousal_frame, textvariable=ssvep_arousal_arrow_color_var, width=8)
     ssvep_arousal_arrow_color_entry.grid(row=9, column=1, sticky="w", pady=2, padx=(10, 0))
 
-    # Arrow height
+    # 箭头大小
     ttk.Label(ssvep_arousal_frame, text="箭头大小").grid(row=10, column=0, sticky="w", pady=2)
     ssvep_arousal_arrow_height_var = tk.StringVar(value=str(defaults.get("ssvep_arousal_arrow_height", 0.20)))
     ssvep_arousal_arrow_height_entry = ttk.Entry(ssvep_arousal_frame, textvariable=ssvep_arousal_arrow_height_var, width=8)
     ssvep_arousal_arrow_height_entry.grid(row=10, column=1, sticky="w", pady=2, padx=(10, 0))
 
-    # ── SSVEP Serial specific options (visible only when trial_mode == mi_ssvep_serial) ──
+    # ── SSVEP Serial 特定选项（仅 trial_mode == mi_ssvep_serial 时可见）──
     ssvep_serial_frame = ttk.LabelFrame(main_frame, text="SSVEP Serial 设置", padding=8)
     ssvep_serial_frame.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
     row += 1
 
-    # Cue SSVEP mode
+    # 提示模式
     ttk.Label(ssvep_serial_frame, text="提示模式").grid(row=0, column=0, sticky="w", pady=2)
     ssvep_serial_cue_ssvep_mode_var = tk.StringVar(value=str(defaults.get("ssvep_serial_cue_ssvep_mode", "frequency_coded")))
     ssvep_serial_cue_ssvep_mode_combo = ttk.Combobox(ssvep_serial_frame, textvariable=ssvep_serial_cue_ssvep_mode_var,
@@ -5234,7 +5282,7 @@ def show_session_dialog(args: argparse.Namespace,
     ttk.Label(ssvep_serial_frame, text="(frequency_coded=频率编码方向, same_freq=同频不编码方向)").grid(
         row=0, column=2, sticky="w", pady=2, padx=(5, 0))
 
-    # Cue SSVEP left freq
+    # 提示左频率
     ssvep_serial_cue_ssvep_freq_left_label = ttk.Label(ssvep_serial_frame, text="提示左频率")
     ssvep_serial_cue_ssvep_freq_left_label.grid(row=1, column=0, sticky="w", pady=2)
     ssvep_serial_cue_ssvep_freq_left_var = tk.StringVar(value=str(defaults.get("ssvep_serial_cue_ssvep_freq_left_hz", 10.0)))
@@ -5243,7 +5291,7 @@ def show_session_dialog(args: argparse.Namespace,
     ssvep_serial_cue_ssvep_freq_left_hz_label = ttk.Label(ssvep_serial_frame, text="Hz")
     ssvep_serial_cue_ssvep_freq_left_hz_label.grid(row=1, column=2, sticky="w", pady=2)
 
-    # Cue SSVEP right freq
+    # 提示右频率
     ssvep_serial_cue_ssvep_freq_right_label = ttk.Label(ssvep_serial_frame, text="提示右频率")
     ssvep_serial_cue_ssvep_freq_right_label.grid(row=2, column=0, sticky="w", pady=2)
     ssvep_serial_cue_ssvep_freq_right_var = tk.StringVar(value=str(defaults.get("ssvep_serial_cue_ssvep_freq_right_hz", 15.0)))
@@ -5252,7 +5300,7 @@ def show_session_dialog(args: argparse.Namespace,
     ssvep_serial_cue_ssvep_freq_right_hz_label = ttk.Label(ssvep_serial_frame, text="Hz")
     ssvep_serial_cue_ssvep_freq_right_hz_label.grid(row=2, column=2, sticky="w", pady=2)
 
-    # Same freq
+    # 同频模式频率
     ssvep_serial_same_freq_label = ttk.Label(ssvep_serial_frame, text="同频模式频率")
     ssvep_serial_same_freq_label.grid(row=3, column=0, sticky="w", pady=2)
     ssvep_serial_same_freq_var = tk.StringVar(value=str(defaults.get("ssvep_serial_same_freq_hz", 20.0)))
@@ -5261,28 +5309,28 @@ def show_session_dialog(args: argparse.Namespace,
     ssvep_serial_same_freq_hz_label = ttk.Label(ssvep_serial_frame, text="Hz")
     ssvep_serial_same_freq_hz_label.grid(row=3, column=2, sticky="w", pady=2)
 
-    # Cue SSVEP duration
+    # 提示时长
     ttk.Label(ssvep_serial_frame, text="提示时长").grid(row=4, column=0, sticky="w", pady=2)
     ssvep_serial_cue_ssvep_duration_var = tk.StringVar(value=str(defaults.get("ssvep_serial_cue_ssvep_duration_s", 2.0)))
     ssvep_serial_cue_ssvep_duration_entry = ttk.Entry(ssvep_serial_frame, textvariable=ssvep_serial_cue_ssvep_duration_var, width=8)
     ssvep_serial_cue_ssvep_duration_entry.grid(row=4, column=1, sticky="w", pady=2, padx=(10, 0))
     ttk.Label(ssvep_serial_frame, text="s").grid(row=4, column=2, sticky="w", pady=2)
 
-    # Gap duration
+    # 间隔时长
     ttk.Label(ssvep_serial_frame, text="间隔时长").grid(row=5, column=0, sticky="w", pady=2)
     ssvep_serial_gap_duration_var = tk.StringVar(value=str(defaults.get("ssvep_serial_gap_duration_s", 2.0)))
     ssvep_serial_gap_duration_entry = ttk.Entry(ssvep_serial_frame, textvariable=ssvep_serial_gap_duration_var, width=8)
     ssvep_serial_gap_duration_entry.grid(row=5, column=1, sticky="w", pady=2, padx=(10, 0))
     ttk.Label(ssvep_serial_frame, text="s").grid(row=5, column=2, sticky="w", pady=2)
 
-    # MI duration
+    # MI 时长
     ttk.Label(ssvep_serial_frame, text="MI时长").grid(row=6, column=0, sticky="w", pady=2)
     ssvep_serial_mi_duration_var = tk.StringVar(value=str(defaults.get("ssvep_serial_mi_duration_s", 4.0)))
     ssvep_serial_mi_duration_entry = ttk.Entry(ssvep_serial_frame, textvariable=ssvep_serial_mi_duration_var, width=8)
     ssvep_serial_mi_duration_entry.grid(row=6, column=1, sticky="w", pady=2, padx=(10, 0))
     ttk.Label(ssvep_serial_frame, text="s").grid(row=6, column=2, sticky="w", pady=2)
 
-    # Waveform
+    # 波形
     ttk.Label(ssvep_serial_frame, text="闪烁波形").grid(row=7, column=0, sticky="w", pady=2)
     ssvep_serial_waveform_var = tk.StringVar(value=str(defaults.get("ssvep_serial_waveform", "sine")))
     ssvep_serial_waveform_combo = ttk.Combobox(ssvep_serial_frame, textvariable=ssvep_serial_waveform_var,
@@ -5291,21 +5339,21 @@ def show_session_dialog(args: argparse.Namespace,
     ttk.Label(ssvep_serial_frame, text="(square=方波更强信号, sine=正弦更舒适)").grid(
         row=7, column=2, sticky="w", pady=2, padx=(5, 0))
 
-    # Cue style
+    # 提示样式
     ttk.Label(ssvep_serial_frame, text="提示样式").grid(row=8, column=0, sticky="w", pady=2)
     ssvep_serial_cue_style_var = tk.StringVar(value=str(defaults.get("ssvep_serial_cue_style", "arrow")))
     ssvep_serial_cue_style_combo = ttk.Combobox(ssvep_serial_frame, textvariable=ssvep_serial_cue_style_var,
                                               values=["arrow", "image"], state="readonly", width=10)
     ssvep_serial_cue_style_combo.grid(row=8, column=1, sticky="w", pady=2, padx=(10, 0))
 
-    # Task style
+    # 任务样式
     ttk.Label(ssvep_serial_frame, text="任务样式").grid(row=9, column=0, sticky="w", pady=2)
     ssvep_serial_task_style_var = tk.StringVar(value=str(defaults.get("ssvep_serial_task_style", "arrow")))
     ssvep_serial_task_style_combo = ttk.Combobox(ssvep_serial_frame, textvariable=ssvep_serial_task_style_var,
                                                values=["arrow", "image"], state="readonly", width=10)
     ssvep_serial_task_style_combo.grid(row=9, column=1, sticky="w", pady=2, padx=(10, 0))
 
-    # Display mode
+    # 显示模式
     ttk.Label(ssvep_serial_frame, text="显示模式").grid(row=10, column=0, sticky="w", pady=2)
     ssvep_serial_display_mode_var = tk.StringVar(value=str(defaults.get("ssvep_serial_display_mode", "single_center")))
     ssvep_serial_display_mode_combo = ttk.Combobox(ssvep_serial_frame, textvariable=ssvep_serial_display_mode_var,
@@ -5314,48 +5362,48 @@ def show_session_dialog(args: argparse.Namespace,
     ttk.Label(ssvep_serial_frame, text="(single_center=仅目标侧居中, both_sides=双侧)").grid(
         row=10, column=2, sticky="w", pady=2, padx=(5, 0))
 
-    # Stimulus width
+    # 刺激宽度
     ttk.Label(ssvep_serial_frame, text="刺激宽度").grid(row=11, column=0, sticky="w", pady=2)
     ssvep_serial_stimulus_width_var = tk.StringVar(value=str(defaults.get("ssvep_serial_stimulus_width", 0.35)))
     ssvep_serial_stimulus_width_entry = ttk.Entry(ssvep_serial_frame, textvariable=ssvep_serial_stimulus_width_var, width=8)
     ssvep_serial_stimulus_width_entry.grid(row=11, column=1, sticky="w", pady=2, padx=(10, 0))
 
-    # Stimulus height
+    # 刺激高度
     ttk.Label(ssvep_serial_frame, text="刺激高度").grid(row=12, column=0, sticky="w", pady=2)
     ssvep_serial_stimulus_height_var = tk.StringVar(value=str(defaults.get("ssvep_serial_stimulus_height", 0.35)))
     ssvep_serial_stimulus_height_entry = ttk.Entry(ssvep_serial_frame, textvariable=ssvep_serial_stimulus_height_var, width=8)
     ssvep_serial_stimulus_height_entry.grid(row=12, column=1, sticky="w", pady=2, padx=(10, 0))
 
-    # Border width
+    # 边框宽度
     ttk.Label(ssvep_serial_frame, text="边框宽度").grid(row=13, column=0, sticky="w", pady=2)
     ssvep_serial_border_width_var = tk.StringVar(value=str(defaults.get("ssvep_serial_border_width", 4.0)))
     ssvep_serial_border_width_entry = ttk.Entry(ssvep_serial_frame, textvariable=ssvep_serial_border_width_var, width=8)
     ssvep_serial_border_width_entry.grid(row=13, column=1, sticky="w", pady=2, padx=(10, 0))
 
-    # Dim opacity
+    # 透明度
     ttk.Label(ssvep_serial_frame, text="透明度").grid(row=14, column=0, sticky="w", pady=2)
     ssvep_serial_dim_opacity_var = tk.StringVar(value=str(defaults.get("ssvep_serial_dim_opacity", 0.0)))
     ssvep_serial_dim_opacity_entry = ttk.Entry(ssvep_serial_frame, textvariable=ssvep_serial_dim_opacity_var, width=8)
     ssvep_serial_dim_opacity_entry.grid(row=14, column=1, sticky="w", pady=2, padx=(10, 0))
 
-    # Arrow color
+    # 箭头颜色
     ttk.Label(ssvep_serial_frame, text="箭头颜色").grid(row=15, column=0, sticky="w", pady=2)
     ssvep_serial_arrow_color_var = tk.StringVar(value=str(defaults.get("ssvep_serial_arrow_color", "white")))
     ssvep_serial_arrow_color_entry = ttk.Entry(ssvep_serial_frame, textvariable=ssvep_serial_arrow_color_var, width=8)
     ssvep_serial_arrow_color_entry.grid(row=15, column=1, sticky="w", pady=2, padx=(10, 0))
 
-    # Arrow height
+    # 箭头大小
     ttk.Label(ssvep_serial_frame, text="箭头大小").grid(row=16, column=0, sticky="w", pady=2)
     ssvep_serial_arrow_height_var = tk.StringVar(value=str(defaults.get("ssvep_serial_arrow_height", 0.20)))
     ssvep_serial_arrow_height_entry = ttk.Entry(ssvep_serial_frame, textvariable=ssvep_serial_arrow_height_var, width=8)
     ssvep_serial_arrow_height_entry.grid(row=16, column=1, sticky="w", pady=2, padx=(10, 0))
 
-    # ── SSVEP RT-specific options (visible only when trial_mode == mi_ssvep_rt) ──
+    # ── SSVEP RT 特定选项（仅 trial_mode == mi_ssvep_rt 时可见）──
     ssvep_rt_frame = ttk.LabelFrame(main_frame, text="MI+SSVEP 实时分类设置", padding=8)
     ssvep_rt_frame.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
     row += 1
 
-    # MI enable checkbox
+    # MI 启用复选框
     _rt_mi_enabled_default = str(defaults.get("ssvep_rt_mi_enabled", "False")).lower() in ("true", "1", "yes", "on")
     ssvep_rt_mi_enabled_var = tk.BooleanVar(value=_rt_mi_enabled_default)
 
@@ -5370,7 +5418,7 @@ def show_session_dialog(args: argparse.Namespace,
         variable=ssvep_rt_mi_enabled_var, command=_on_rt_mi_toggle,
     ).grid(row=0, column=0, columnspan=3, sticky="w", pady=2)
 
-    # MI checkpoint path — hidden unless MI enabled
+    # MI 检查点路径 — 仅 MI 启用时可见
     _rt_mi_checkpoint_frame = ttk.Frame(ssvep_rt_frame)
     _rt_mi_checkpoint_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=2)
     _rt_mi_checkpoint_frame.columnconfigure(1, weight=1)
@@ -5395,80 +5443,88 @@ def show_session_dialog(args: argparse.Namespace,
     ttk.Label(ssvep_rt_frame, text="（勾选后选择.pth模型文件；不勾选则仅用FBCCA）").grid(
         row=2, column=0, columnspan=3, sticky="w", pady=0)
 
-    # Initial visibility based on saved default
+    # 根据保存的默认值设置初始可见性
     if not _rt_mi_enabled_default:
         _rt_mi_checkpoint_frame.grid_remove()
 
-    # Classifier window size
+    # 分类窗口大小
     ttk.Label(ssvep_rt_frame, text="分类窗口 (s)").grid(row=3, column=0, sticky="w", pady=2)
     ssvep_rt_window_var = tk.StringVar(value=str(defaults.get("ssvep_rt_classifier_window_s", 1.5)))
     ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_window_var, width=8).grid(
         row=3, column=1, sticky="w", pady=2, padx=(10, 0))
     ttk.Label(ssvep_rt_frame, text="秒（默认1.5）").grid(row=3, column=2, sticky="w", pady=2)
 
-    # Classifier stride
+    # 分类步长
     ttk.Label(ssvep_rt_frame, text="滑动步长 (s)").grid(row=4, column=0, sticky="w", pady=2)
     ssvep_rt_stride_var = tk.StringVar(value=str(defaults.get("ssvep_rt_classifier_stride_s", 0.25)))
     ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_stride_var, width=8).grid(
         row=4, column=1, sticky="w", pady=2, padx=(10, 0))
     ttk.Label(ssvep_rt_frame, text="秒（默认0.25）").grid(row=4, column=2, sticky="w", pady=2)
 
-    # Confidence threshold
+    # 置信度阈值
     ttk.Label(ssvep_rt_frame, text="置信度阈值").grid(row=5, column=0, sticky="w", pady=2)
     ssvep_rt_conf_var = tk.StringVar(value=str(defaults.get("ssvep_rt_confidence_threshold", 0.15)))
     ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_conf_var, width=8).grid(
         row=5, column=1, sticky="w", pady=2, padx=(10, 0))
     ttk.Label(ssvep_rt_frame, text="（默认0.15，基于相关系数差值）").grid(row=5, column=2, sticky="w", pady=2)
 
-    # SSVEP display settings (reuse pattern from ssvep_frame)
-    ttk.Label(ssvep_rt_frame, text="闪烁模式").grid(row=6, column=0, sticky="w", pady=2)
+    # LSL 诊断模式
+    _rt_diag_default = str(defaults.get("ssvep_rt_enable_diag", "False")).lower() in ("true", "1", "yes", "on")
+    ssvep_rt_enable_diag_var = tk.BooleanVar(value=_rt_diag_default)
+    ttk.Checkbutton(
+        ssvep_rt_frame, text="启用LSL诊断（检测数据间隙/丢包，保存原始窗口）",
+        variable=ssvep_rt_enable_diag_var,
+    ).grid(row=6, column=0, columnspan=3, sticky="w", pady=2)
+
+    # SSVEP 显示设置（复用 ssvep_frame 的模式）
+    ttk.Label(ssvep_rt_frame, text="闪烁模式").grid(row=7, column=0, sticky="w", pady=2)
     ssvep_rt_flicker_mode_var = tk.StringVar(value=str(defaults.get("ssvep_rt_flicker_mode", "border")))
     ttk.Combobox(ssvep_rt_frame, textvariable=ssvep_rt_flicker_mode_var,
                  values=["image", "border"], state="readonly", width=10).grid(
-        row=6, column=1, sticky="w", pady=2, padx=(10, 0))
+        row=7, column=1, sticky="w", pady=2, padx=(10, 0))
     ttk.Label(ssvep_rt_frame, text="(image=图片透明度闪烁, border=边框颜色闪烁)").grid(
-        row=6, column=2, sticky="w", pady=2, padx=(5, 0))
+        row=7, column=2, sticky="w", pady=2, padx=(5, 0))
 
-    ttk.Label(ssvep_rt_frame, text="闪烁波形").grid(row=7, column=0, sticky="w", pady=2)
+    ttk.Label(ssvep_rt_frame, text="闪烁波形").grid(row=8, column=0, sticky="w", pady=2)
     ssvep_rt_waveform_var = tk.StringVar(value=str(defaults.get("ssvep_rt_waveform", "square")))
     ttk.Combobox(ssvep_rt_frame, textvariable=ssvep_rt_waveform_var,
                  values=["square", "sine"], state="readonly", width=10).grid(
-        row=7, column=1, sticky="w", pady=2, padx=(10, 0))
+        row=8, column=1, sticky="w", pady=2, padx=(10, 0))
     ttk.Label(ssvep_rt_frame, text="(square=方波更强信号, sine=正弦更舒适)").grid(
-        row=7, column=2, sticky="w", pady=2, padx=(5, 0))
+        row=8, column=2, sticky="w", pady=2, padx=(5, 0))
 
-    ttk.Label(ssvep_rt_frame, text="左手频率").grid(row=8, column=0, sticky="w", pady=2)
+    ttk.Label(ssvep_rt_frame, text="左手频率").grid(row=9, column=0, sticky="w", pady=2)
     ssvep_rt_left_freq_var = tk.StringVar(value=str(defaults.get("ssvep_rt_left_freq_hz", 10.0)))
     ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_left_freq_var, width=8).grid(
-        row=8, column=1, sticky="w", pady=2, padx=(10, 0))
-    ttk.Label(ssvep_rt_frame, text="Hz").grid(row=8, column=2, sticky="w", pady=2)
-
-    ttk.Label(ssvep_rt_frame, text="右手频率").grid(row=9, column=0, sticky="w", pady=2)
-    ssvep_rt_right_freq_var = tk.StringVar(value=str(defaults.get("ssvep_rt_right_freq_hz", 15.0)))
-    ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_right_freq_var, width=8).grid(
         row=9, column=1, sticky="w", pady=2, padx=(10, 0))
     ttk.Label(ssvep_rt_frame, text="Hz").grid(row=9, column=2, sticky="w", pady=2)
 
-    ttk.Label(ssvep_rt_frame, text="显示模式").grid(row=10, column=0, sticky="w", pady=2)
+    ttk.Label(ssvep_rt_frame, text="右手频率").grid(row=10, column=0, sticky="w", pady=2)
+    ssvep_rt_right_freq_var = tk.StringVar(value=str(defaults.get("ssvep_rt_right_freq_hz", 15.0)))
+    ttk.Entry(ssvep_rt_frame, textvariable=ssvep_rt_right_freq_var, width=8).grid(
+        row=10, column=1, sticky="w", pady=2, padx=(10, 0))
+    ttk.Label(ssvep_rt_frame, text="Hz").grid(row=10, column=2, sticky="w", pady=2)
+
+    ttk.Label(ssvep_rt_frame, text="显示模式").grid(row=11, column=0, sticky="w", pady=2)
     ssvep_rt_display_mode_var = tk.StringVar(value=str(defaults.get("ssvep_rt_display_mode", "single_side")))
     ttk.Combobox(ssvep_rt_frame, textvariable=ssvep_rt_display_mode_var,
                  values=["single_side", "both_sides", "single_center"],
                  state="readonly", width=12).grid(
-        row=10, column=1, sticky="w", pady=2, padx=(10, 0))
+        row=11, column=1, sticky="w", pady=2, padx=(10, 0))
     ttk.Label(ssvep_rt_frame, text="(single_side=仅目标侧, both_sides=双侧, single_center=居中)").grid(
-        row=10, column=2, sticky="w", pady=2, padx=(5, 0))
+        row=11, column=2, sticky="w", pady=2, padx=(5, 0))
 
-    # Show/hide SSVEP/P300/SSVEP Arousal/SSVEP Serial/SSVEP RT frame based on trial_mode
-    ssvep_frame_row = row - 5  # remember the grid row for re-showing
+    # 根据 trial_mode 显示/隐藏 SSVEP/P300/SSVEP Arousal/SSVEP Serial/SSVEP RT 面板
+    ssvep_frame_row = row - 5
     p300_frame_row = row - 4
     ssvep_arousal_frame_row = row - 3
     ssvep_serial_frame_row = row - 2
     ssvep_rt_frame_row = row - 1
 
     def _on_arousal_freq_mode_change(_event: object = None) -> None:
-        """Show/hide fields based on SSVEP Arousal freq mode selection."""
+        """根据 SSVEP Arousal 频率模式选择显示/隐藏字段。"""
         is_fixed = ssvep_arousal_freq_mode_var.get() == "fixed"
-        # Fixed freq visible only in fixed mode
+        # 固定频率仅在 fixed 模式下可见
         if is_fixed:
             ssvep_arousal_fixed_freq_label.grid(row=1, column=0, sticky="w", pady=2)
             ssvep_arousal_fixed_freq_entry.grid(row=1, column=1, sticky="w", pady=2, padx=(10, 0))
@@ -5477,7 +5533,7 @@ def show_session_dialog(args: argparse.Namespace,
             ssvep_arousal_fixed_freq_label.grid_forget()
             ssvep_arousal_fixed_freq_entry.grid_forget()
             ssvep_arousal_fixed_freq_hz_label.grid_forget()
-        # Min/max freq visible only in random mode
+        # 最小/最大频率仅在 random 模式下可见
         if not is_fixed:
             ssvep_arousal_freq_min_label.grid(row=2, column=0, sticky="w", pady=2)
             ssvep_arousal_freq_min_entry.grid(row=2, column=1, sticky="w", pady=2, padx=(10, 0))
@@ -5494,9 +5550,9 @@ def show_session_dialog(args: argparse.Namespace,
             ssvep_arousal_freq_max_hz_label.grid_forget()
 
     def _on_serial_cue_mode_change(_event: object = None) -> None:
-        """Show/hide fields based on SSVEP Serial cue mode selection."""
+        """根据 SSVEP Serial 提示模式选择显示/隐藏字段。"""
         is_freq_coded = ssvep_serial_cue_ssvep_mode_var.get() == "frequency_coded"
-        # Left/right freq visible only in frequency_coded mode
+        # 左右频率仅在 frequency_coded 模式下可见
         if is_freq_coded:
             ssvep_serial_cue_ssvep_freq_left_label.grid(row=1, column=0, sticky="w", pady=2)
             ssvep_serial_cue_ssvep_freq_left_entry.grid(row=1, column=1, sticky="w", pady=2, padx=(10, 0))
@@ -5511,7 +5567,7 @@ def show_session_dialog(args: argparse.Namespace,
             ssvep_serial_cue_ssvep_freq_right_label.grid_forget()
             ssvep_serial_cue_ssvep_freq_right_entry.grid_forget()
             ssvep_serial_cue_ssvep_freq_right_hz_label.grid_forget()
-        # Same freq visible only in same_freq mode
+        # 同频仅在 same_freq 模式下可见
         if not is_freq_coded:
             ssvep_serial_same_freq_label.grid(row=3, column=0, sticky="w", pady=2)
             ssvep_serial_same_freq_entry.grid(row=3, column=1, sticky="w", pady=2, padx=(10, 0))
@@ -5523,7 +5579,7 @@ def show_session_dialog(args: argparse.Namespace,
 
     ssvep_arousal_freq_mode_combo.bind("<<ComboboxSelected>>", _on_arousal_freq_mode_change)
     ssvep_serial_cue_ssvep_mode_combo.bind("<<ComboboxSelected>>", _on_serial_cue_mode_change)
-    # Apply initial visibility
+    # 应用初始可见性
     _on_arousal_freq_mode_change()
     _on_serial_cue_mode_change()
 
@@ -5574,7 +5630,7 @@ def show_session_dialog(args: argparse.Namespace,
     trial_combo.bind("<<ComboboxSelected>>", _on_trial_mode_change)
     mode_combo.bind("<<ComboboxSelected>>", _on_mode_change)
 
-    # Initial visibility
+    # 初始可见性
     if trial_var.get() in ("mi_ssvep", "pure_ssvep"):
         p300_frame.grid_forget()
         ssvep_arousal_frame.grid_forget()
@@ -5612,7 +5668,7 @@ def show_session_dialog(args: argparse.Namespace,
 
     main_frame.columnconfigure(1, weight=1)
 
-    # ── Buttons ──
+    # ── 按钮 ──
     btn_frame = ttk.Frame(main_frame)
     btn_frame.grid(row=row, column=0, columnspan=3, pady=(15, 0))
 
@@ -5630,7 +5686,7 @@ def show_session_dialog(args: argparse.Namespace,
         result["mode"] = mode_var.get()
         result["class_mode"] = class_var.get()
         result["fullscreen"] = fullscreen_var.get()
-        # Custom mode settings
+        # 自定义模式设置
         if mode_var.get() == "custom":
             try:
                 result["blocks"] = int(custom_blocks_var.get().strip())
@@ -5640,15 +5696,15 @@ def show_session_dialog(args: argparse.Namespace,
                 result["repeats_per_class"] = int(custom_trials_var.get().strip())
             except ValueError:
                 result["repeats_per_class"] = 10
-        # Monitor index from combo selection
+        # 从组合选择中获取显示器索引
         sel = monitor_var.get()
         result["display_index"] = monitor_labels.index(sel) if sel in monitor_labels else 0
-        # Refresh rate
+        # 刷新率
         try:
             result["refresh_rate"] = float(refresh_var.get().strip())
         except ValueError:
             result["refresh_rate"] = float(monitors[result["display_index"]]["refresh_rate"])
-        # SSVEP-specific overrides (only relevant when trial_mode == mi_ssvep or pure_ssvep)
+        # SSVEP 特定覆盖（仅 trial_mode == mi_ssvep 或 pure_ssvep 时相关）
         result["ssvep_flicker_mode"] = flicker_mode_var.get()
         result["ssvep_waveform"] = waveform_var.get()
         result["ssvep_display_mode"] = ssvep_display_mode_var.get()
@@ -5660,14 +5716,14 @@ def show_session_dialog(args: argparse.Namespace,
             result["ssvep_right_freq"] = float(right_freq_var.get().strip())
         except ValueError:
             result["ssvep_right_freq"] = 15.0
-        # P300-specific overrides (only relevant when trial_mode == mi_p300)
+        # P300 特定覆盖（仅 trial_mode == mi_p300 时相关）
         result["p300_flicker_mode"] = p300_flicker_mode_var.get()
         try:
             prob = float(p300_target_prob_var.get().strip())
             result["p300_target_probability"] = max(0.01, min(0.99, prob))
         except ValueError:
             result["p300_target_probability"] = 0.25
-        # SSVEP Arousal specific overrides (only relevant when trial_mode == mi_ssvep_arousal)
+        # SSVEP Arousal 特定覆盖（仅 trial_mode == mi_ssvep_arousal 时相关）
         result["ssvep_arousal_freq_mode"] = ssvep_arousal_freq_mode_var.get()
         result["ssvep_arousal_waveform"] = ssvep_arousal_waveform_var.get()
         result["ssvep_arousal_cue_style"] = ssvep_arousal_cue_style_var.get()
@@ -5697,7 +5753,7 @@ def show_session_dialog(args: argparse.Namespace,
             result["ssvep_arousal_arrow_height"] = float(ssvep_arousal_arrow_height_var.get().strip())
         except ValueError:
             result["ssvep_arousal_arrow_height"] = 0.20
-        # SSVEP Serial specific overrides (only relevant when trial_mode == mi_ssvep_serial)
+        # SSVEP Serial 特定覆盖（仅 trial_mode == mi_ssvep_serial 时相关）
         result["ssvep_serial_cue_ssvep_mode"] = ssvep_serial_cue_ssvep_mode_var.get()
         result["ssvep_serial_waveform"] = ssvep_serial_waveform_var.get()
         result["ssvep_serial_cue_style"] = ssvep_serial_cue_style_var.get()
@@ -5748,7 +5804,7 @@ def show_session_dialog(args: argparse.Namespace,
             result["ssvep_serial_arrow_height"] = float(ssvep_serial_arrow_height_var.get().strip())
         except ValueError:
             result["ssvep_serial_arrow_height"] = 0.20
-        # SSVEP RT specific overrides (only relevant when trial_mode == mi_ssvep_rt)
+        # SSVEP RT 特定覆盖（仅 trial_mode == mi_ssvep_rt 时相关）
         result["ssvep_rt_mi_enabled"] = ssvep_rt_mi_enabled_var.get()
         result["ssvep_rt_mi_checkpoint_path"] = ssvep_rt_checkpoint_var.get()
         result["ssvep_rt_flicker_mode"] = ssvep_rt_flicker_mode_var.get()
@@ -5774,6 +5830,7 @@ def show_session_dialog(args: argparse.Namespace,
             result["ssvep_rt_right_freq_hz"] = float(ssvep_rt_right_freq_var.get() or "15.0")
         except ValueError:
             result["ssvep_rt_right_freq_hz"] = 15.0
+        result["ssvep_rt_enable_diag"] = ssvep_rt_enable_diag_var.get()
         root.destroy()
 
     def on_cancel() -> None:
@@ -5785,11 +5842,11 @@ def show_session_dialog(args: argparse.Namespace,
 
     root.protocol("WM_DELETE_WINDOW", on_cancel)
 
-    # Focus first entry
+    # 聚焦第一个输入
     entries["participant"].focus_set()
     entries["participant"].select_range(0, "end")
 
-    # Bind Enter to OK, Escape to Cancel
+    # 绑定 Enter 到 OK，Escape 到 Cancel
     root.bind("<Return>", lambda _e: on_ok())
     root.bind("<Escape>", lambda _e: on_cancel())
 
@@ -5798,10 +5855,10 @@ def show_session_dialog(args: argparse.Namespace,
     if cancelled[0] or not result:
         return None
 
-    # Save for next session
+    # 保存以供下次使用
     _save_last_session(**result)
 
-    # Override args with dialog values
+    # 用对话框值覆盖参数
     args.participant = result["participant"]
     args.session = result["session"]
     args.run = result["run"]
@@ -5818,7 +5875,7 @@ def show_session_dialog(args: argparse.Namespace,
         args.blocks = result["blocks"]
     if "repeats_per_class" in result:
         args.repeats_per_class = result["repeats_per_class"]
-    # SSVEP-specific overrides from dialog
+    # 来自对话框的 SSVEP 特定覆盖
     if "ssvep_flicker_mode" in result:
         args.ssvep_flicker_mode = result["ssvep_flicker_mode"]
     if "ssvep_waveform" in result:
@@ -5829,12 +5886,12 @@ def show_session_dialog(args: argparse.Namespace,
         args.ssvep_left_freq = result["ssvep_left_freq"]
     if "ssvep_right_freq" in result:
         args.ssvep_right_freq = result["ssvep_right_freq"]
-    # P300-specific overrides from dialog
+    # 来自对话框的 P300 特定覆盖
     if "p300_flicker_mode" in result:
         args.p300_flicker_mode = result["p300_flicker_mode"]
     if "p300_target_probability" in result:
         args.p300_target_probability = result["p300_target_probability"]
-    # SSVEP Arousal specific overrides from dialog
+    # 来自对话框的 SSVEP Arousal 特定覆盖
     if "ssvep_arousal_freq_mode" in result:
         args.ssvep_arousal_freq_mode = result["ssvep_arousal_freq_mode"]
     if "ssvep_arousal_fixed_freq_hz" in result:
@@ -5857,7 +5914,7 @@ def show_session_dialog(args: argparse.Namespace,
         args.ssvep_arousal_arrow_color = result["ssvep_arousal_arrow_color"]
     if "ssvep_arousal_arrow_height" in result:
         args.ssvep_arousal_arrow_height = result["ssvep_arousal_arrow_height"]
-    # SSVEP Serial specific overrides from dialog
+    # 来自对话框的 SSVEP Serial 特定覆盖
     if "ssvep_serial_cue_ssvep_mode" in result:
         args.ssvep_serial_cue_ssvep_mode = result["ssvep_serial_cue_ssvep_mode"]
     if "ssvep_serial_waveform" in result:
@@ -5892,7 +5949,7 @@ def show_session_dialog(args: argparse.Namespace,
         args.ssvep_serial_dim_opacity = result["ssvep_serial_dim_opacity"]
     if "ssvep_serial_arrow_height" in result:
         args.ssvep_serial_arrow_height = result["ssvep_serial_arrow_height"]
-    # SSVEP RT specific overrides from dialog
+    # 来自对话框的 SSVEP RT 特定覆盖
     if "ssvep_rt_mi_enabled" in result:
         args.ssvep_rt_mi_enabled = result["ssvep_rt_mi_enabled"]
     if "ssvep_rt_mi_checkpoint_path" in result:
@@ -5913,9 +5970,12 @@ def show_session_dialog(args: argparse.Namespace,
         args.ssvep_rt_waveform = result["ssvep_rt_waveform"]
     if "ssvep_rt_display_mode" in result:
         args.ssvep_rt_display_mode = result["ssvep_rt_display_mode"]
+    if "ssvep_rt_enable_diag" in result:
+        args.ssvep_rt_enable_diag = result["ssvep_rt_enable_diag"]
     return args
 
 
+# 入口流程：CLI 解析 → 读取默认值 → 弹出对话框（所有参数的主配置入口）→ build_config → run_session
 def main() -> int:
     try:
         args = parse_args()
@@ -5933,5 +5993,6 @@ def main() -> int:
         return 1
 
 
+# 三种启动模式：全屏阻塞 / 检测-尝试 / 直接开始
 if __name__ == "__main__":
     raise SystemExit(main())
