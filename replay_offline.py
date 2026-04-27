@@ -653,7 +653,7 @@ def main() -> int:
         else:
             sys.exit(f"ERROR: No XDF path specified and default not found: {default_path}")
 
-    mi_ckpt = "" if args.no_mi else args.mi_checkpoint
+    mi_ckpt = "__NO_MI__" if args.no_mi else args.mi_checkpoint
 
     if args.sim_rt:
         replay_sim_rt(

@@ -1236,9 +1236,11 @@ class SessionUI:
         title: str,
         target_side: str,
         target_freq_hz: float,
+        no_guide: bool = False,
     ) -> None:
         self._apply_stimulus_layout()
-        self._draw_title(title)
+        if not no_guide:
+            self._draw_title(title)
 
         # 根据 display_mode 决定渲染哪些侧
         show_left = True
@@ -1288,12 +1290,14 @@ class SessionUI:
         else:
             # 边框闪烁模式：静态图片 + 正弦调制的边框颜色
             border_pad = 0.02
+            # pure_ssvep 无引导：两侧用相同 bright_color（不区分 target/non-target）
+            _left_bright = ssvep.bright_color if no_guide else (ssvep.target_ring_color if target_side == "left" else ssvep.bright_color)
+            _right_bright = ssvep.bright_color if no_guide else (ssvep.target_ring_color if target_side == "right" else ssvep.bright_color)
             if show_left:
-                left_bright_color = ssvep.target_ring_color if target_side == "left" else ssvep.bright_color
                 if ssvep.waveform == "sine":
-                    left_border_color = self._interpolate_color(ssvep.dark_color, left_bright_color, left_opacity)
+                    left_border_color = self._interpolate_color(ssvep.dark_color, _left_bright, left_opacity)
                 else:
-                    left_border_color = left_bright_color if left_opacity >= 0.5 else ssvep.dark_color
+                    left_border_color = _left_bright if left_opacity >= 0.5 else ssvep.dark_color
                 left_size = self._draw_positioned_image(
                     self.stimuli.pure_mi_left_image_path,
                     pos=left_pos,
@@ -1307,11 +1311,10 @@ class SessionUI:
                         line_width=ssvep.flicker_border_width,
                     )
             if show_right:
-                right_bright_color = ssvep.target_ring_color if target_side == "right" else ssvep.bright_color
                 if ssvep.waveform == "sine":
-                    right_border_color = self._interpolate_color(ssvep.dark_color, right_bright_color, right_opacity)
+                    right_border_color = self._interpolate_color(ssvep.dark_color, _right_bright, right_opacity)
                 else:
-                    right_border_color = right_bright_color if right_opacity >= 0.5 else ssvep.dark_color
+                    right_border_color = _right_bright if right_opacity >= 0.5 else ssvep.dark_color
                 right_size = self._draw_positioned_image(
                     self.stimuli.pure_mi_right_image_path,
                     pos=right_pos,
@@ -1325,44 +1328,44 @@ class SessionUI:
                         line_width=ssvep.flicker_border_width,
                     )
 
-        # 频率标签 — 仅显示实际显示的侧
-        if show_left:
-            label_x = 0 if ssvep.display_mode == "single_center" else ssvep.left_x_pos
-            self._draw_cached_text(
-                text=f"L {ssvep.left_freq_hz:.1f} Hz",
-                height=0.04,
-                pos=(label_x, ssvep.flicker_y_pos - ssvep.flicker_size[1] / 2 - 0.07),
-            )
-        if show_right:
-            label_x = 0 if ssvep.display_mode == "single_center" else ssvep.right_x_pos
-            self._draw_cached_text(
-                text=f"R {ssvep.right_freq_hz:.1f} Hz",
-                height=0.04,
-                pos=(label_x, ssvep.flicker_y_pos - ssvep.flicker_size[1] / 2 - 0.07),
-            )
-
-        # 绘制目标环（最外层，叠在闪烁边框/图片之上）— 仅在 image 模式下
-        # 在 border 模式下，闪烁边框本身已经为目标侧染成黄色
-        if ssvep.flicker_mode == "image" and target_side in {"left", "right"}:
-            if ssvep.display_mode == "single_center":
-                target_x = 0
-            else:
-                target_x = ssvep.left_x_pos if target_side == "left" else ssvep.right_x_pos
-            target_size = left_size if target_side == "left" else right_size
-            if target_size is not None:
-                self._draw_border(
-                    pos=(target_x, ssvep.flicker_y_pos),
-                    size=(target_size[0] + 0.05, target_size[1] + 0.05),
-                    color=ssvep.target_ring_color,
-                    line_width=ssvep.target_ring_width,
+        # 频率标签 + 目标引导 — pure_ssvep 模式下全部跳过
+        if not no_guide:
+            if show_left:
+                label_x = 0 if ssvep.display_mode == "single_center" else ssvep.left_x_pos
+                self._draw_cached_text(
+                    text=f"L {ssvep.left_freq_hz:.1f} Hz",
+                    height=0.04,
+                    pos=(label_x, ssvep.flicker_y_pos - ssvep.flicker_size[1] / 2 - 0.07),
                 )
-            gaze_text = "看向目标闪烁并保持运动想象" if ssvep.allow_gaze_shift else "注意目标闪烁并保持中央注视"
-            self._draw_cached_text(
-                text=f"Target: {target_side} ({target_freq_hz:.1f} Hz)\n{gaze_text}",
-                height=0.038,
-                wrap_width=1.3,
-                pos=(0.0, -0.34),
-            )
+            if show_right:
+                label_x = 0 if ssvep.display_mode == "single_center" else ssvep.right_x_pos
+                self._draw_cached_text(
+                    text=f"R {ssvep.right_freq_hz:.1f} Hz",
+                    height=0.04,
+                    pos=(label_x, ssvep.flicker_y_pos - ssvep.flicker_size[1] / 2 - 0.07),
+                )
+
+            # 绘制目标环（最外层，叠在闪烁边框/图片之上）— 仅在 image 模式下
+            if ssvep.flicker_mode == "image" and target_side in {"left", "right"}:
+                if ssvep.display_mode == "single_center":
+                    target_x = 0
+                else:
+                    target_x = ssvep.left_x_pos if target_side == "left" else ssvep.right_x_pos
+                target_size = left_size if target_side == "left" else right_size
+                if target_size is not None:
+                    self._draw_border(
+                        pos=(target_x, ssvep.flicker_y_pos),
+                        size=(target_size[0] + 0.05, target_size[1] + 0.05),
+                        color=ssvep.target_ring_color,
+                        line_width=ssvep.target_ring_width,
+                    )
+                gaze_text = "看向目标闪烁并保持运动想象" if ssvep.allow_gaze_shift else "注意目标闪烁并保持中央注视"
+                self._draw_cached_text(
+                    text=f"Target: {target_side} ({target_freq_hz:.1f} Hz)\n{gaze_text}",
+                    height=0.038,
+                    wrap_width=1.3,
+                    pos=(0.0, -0.34),
+                )
 
     # 根据 flashing_side 参数决定当前帧哪侧高亮
     def draw_p300_frame(
@@ -1957,7 +1960,7 @@ def get_phase_sequence_for_trial_type(trial_type: str) -> tuple[str, ...]:
     if trial_type == "mi_ssvep":
         return ("fixation", "cue", "mi_ssvep", "iti")
     if trial_type == "pure_ssvep":
-        return ("fixation", "cue", "pure_ssvep", "iti")
+        return ("pure_ssvep",)
     if trial_type == "mi_p300":
         return ("fixation", "cue", "mi_p300", "iti")
     if trial_type == "mi_arrow":
@@ -3119,6 +3122,7 @@ def show_ssvep_phase(
     phase: PhaseSpec,
     ssvep: SSVEPConfig,
     on_flip: Callable[[], None] | None = None,
+    no_guide: bool = False,
 ) -> dict[str, float]:
     frame_index = 0
     timer = core.Clock()
@@ -3158,6 +3162,7 @@ def show_ssvep_phase(
                 title=_title,
                 target_side=_target_side,
                 target_freq_hz=_target_freq_hz,
+                no_guide=no_guide,
             )
             if frame_index == 0 and on_flip is not None:
                 ui.win.callOnFlip(on_flip)
@@ -3175,6 +3180,55 @@ def show_ssvep_phase(
         "left_hz": float(ssvep.left_freq_hz),
         "right_hz": float(ssvep.right_freq_hz),
     }
+
+
+def run_pure_ssvep_bare(win: visual.Window, config: ExperimentConfig, ui: SessionUI) -> None:
+    """Continuous both-sides SSVEP flicker, no markers, no recording. ESC to exit."""
+    import gc as _gc
+    from psychopy import event, core
+    
+    _gc_was_enabled = _gc.isenabled()
+    if _gc_was_enabled:
+        _gc.disable()
+    _was_recording = win.recordFrameIntervals
+    win.recordFrameIntervals = False
+    
+    timer = core.Clock()
+    ssvep = config.ssvep
+    # Force both_sides display mode
+    ssvep = replace(ssvep, display_mode="both_sides")
+    
+    try:
+        while True:
+            keys = event.getKeys(keyList=["escape", "f11", "1", "2", "3"])
+            if "escape" in keys:
+                break
+            # Handle window control keys — must refresh win ref after recreation
+            for key in keys:
+                if key == "f11":
+                    toggle_fullscreen(ui)
+                    win = ui.win  # refresh: toggle_fullscreen creates new window
+                elif key in {"1", "2", "3"}:
+                    preset_index = int(key) - 1
+                    presets = ui.display.window_size_presets
+                    if 0 <= preset_index < len(presets):
+                        set_windowed_size(ui, presets[preset_index])
+                        win = ui.win  # refresh: set_windowed_size creates new window
+            
+            elapsed = timer.getTime()
+            ui.draw_ssvep_frame(
+                ssvep,
+                elapsed_time_s=elapsed,
+                title="",
+                target_side="",
+                target_freq_hz=0.0,
+                no_guide=True,
+            )
+            win.flip()
+    finally:
+        if _gc_was_enabled:
+            _gc.enable()
+        win.recordFrameIntervals = _was_recording
 
 
 # ⚠ SSVEPConfig-from-SSVEPRTConfig 转换 + LSL 非阻塞反馈叠加
@@ -3763,7 +3817,24 @@ def build_trial_phases(trial: Trial, config: ExperimentConfig) -> list[PhaseSpec
         cue_image_path = get_pure_mi_cue_image_path(config.stimuli, trial.condition) if trial.trial_type in ("pure_mi", "ao_mi") else config.stimuli.cue_image_path
         cue_has_image = cue_image_path is not None and cue_image_path.exists()
 
-        if trial.trial_type in ("mi_ssvep", "pure_ssvep"):
+        if trial.trial_type == "pure_ssvep":
+            # 纯 SSVEP：无 fixation/cue/ITI，仅闪烁阶段
+            phases = [
+                PhaseSpec(
+                    phase_name="pure_ssvep",
+                    duration_s=config.ssvep.flicker_duration_s,
+                    screen_kind="pure_ssvep",
+                    title="",
+                    marker_name=f"ssvep_{trial.condition}",
+                    marker_value=MARKERS[f"ssvep_{trial.condition}"],
+                    note=f"pure_ssvep_on; condition={trial.condition}; gaze_target={trial.ssvep_target_side}",
+                    ssvep_target_side=trial.ssvep_target_side,
+                    ssvep_target_freq_hz=trial.ssvep_target_freq_hz,
+                    ssvep_left_freq_hz=config.ssvep.left_freq_hz,
+                    ssvep_right_freq_hz=config.ssvep.right_freq_hz,
+                ),
+            ]
+        elif trial.trial_type == "mi_ssvep":
             cue_image_path = None
             cue_has_image = True
         elif trial.trial_type == "mi_p300":
@@ -3784,7 +3855,7 @@ def build_trial_phases(trial: Trial, config: ExperimentConfig) -> list[PhaseSpec
             PhaseSpec(
                 phase_name="cue",
                 duration_s=config.timings.cue_s,
-                screen_kind="mi_ssvep_cue" if trial.trial_type in ("mi_ssvep", "pure_ssvep") else ("mi_p300_cue" if trial.trial_type == "mi_p300" else "text"),
+                screen_kind="mi_ssvep_cue",
                 title=CONDITION_TO_CUE_TEXT[trial.condition],
                 layout="stimulus",
                 image_path=cue_image_path,
@@ -3795,8 +3866,8 @@ def build_trial_phases(trial: Trial, config: ExperimentConfig) -> list[PhaseSpec
                 center_mode="none" if cue_has_image else "cue_cross",
                 ssvep_target_side=trial.ssvep_target_side,
                 ssvep_target_freq_hz=trial.ssvep_target_freq_hz,
-                ssvep_left_freq_hz=config.ssvep.left_freq_hz if trial.trial_type in ("mi_ssvep", "pure_ssvep") else 0.0,
-                ssvep_right_freq_hz=config.ssvep.right_freq_hz if trial.trial_type in ("mi_ssvep", "pure_ssvep") else 0.0,
+                ssvep_left_freq_hz=config.ssvep.left_freq_hz,
+                ssvep_right_freq_hz=config.ssvep.right_freq_hz,
             ),
         ]
 
@@ -3814,7 +3885,7 @@ def build_trial_phases(trial: Trial, config: ExperimentConfig) -> list[PhaseSpec
                     note="pure_mi_on",
                 )
             )
-        elif trial.trial_type in ("mi_ssvep", "pure_ssvep"):
+        elif trial.trial_type == "mi_ssvep":
             phases[1] = PhaseSpec(
                 phase_name="cue",
                 duration_s=config.timings.cue_s,
@@ -3832,19 +3903,16 @@ def build_trial_phases(trial: Trial, config: ExperimentConfig) -> list[PhaseSpec
             )
             phases.append(
                 PhaseSpec(
-                    phase_name="pure_ssvep" if trial.trial_type == "pure_ssvep" else "mi_ssvep",
+                    phase_name="mi_ssvep",
                     duration_s=config.ssvep.flicker_duration_s,
                     screen_kind="mi_ssvep",
                     title=(
-                        f"{CONDITION_TO_TASK_TEXT[trial.condition]}\n"
-                        f"看向{trial.ssvep_target_side}侧闪烁"
-                    ) if trial.trial_type == "pure_ssvep" else (
                         f"{CONDITION_TO_TASK_TEXT[trial.condition]}\n"
                         f"看向{trial.ssvep_target_side}侧闪烁，保持运动想象"
                     ),
                     marker_name=f"ssvep_{trial.condition}",
                     marker_value=MARKERS[f"ssvep_{trial.condition}"],
-                    note=f"ssvep_on; dual_fist_flicker; gaze_target={trial.ssvep_target_side}" if trial.trial_type == "pure_ssvep" else f"mi_ssvep_on; dual_fist_flicker; gaze_target={trial.ssvep_target_side}",
+                    note=f"mi_ssvep_on; dual_fist_flicker; gaze_target={trial.ssvep_target_side}",
                     ssvep_target_side=trial.ssvep_target_side,
                     ssvep_target_freq_hz=trial.ssvep_target_freq_hz,
                     ssvep_left_freq_hz=config.ssvep.left_freq_hz,
@@ -4022,6 +4090,28 @@ def run_phase(
             target_side=phase.p300_target_side,
             on_flip=on_flip,
         )
+    elif phase.screen_kind == "pure_ssvep":
+        # 纯 SSVEP：无文字、无引导框、无分节
+        stats = show_ssvep_phase(ui, phase, config.ssvep, on_flip=on_flip, no_guide=True)
+        stats_note = (
+            f"rendered_frames={int(stats['rendered_frames'])}; "
+            f"elapsed_s={stats['elapsed_s']:.4f}; "
+            f"left_hz={stats['left_hz']:.4f}; "
+            f"right_hz={stats['right_hz']:.4f}"
+        )
+        logger.log_event(
+            "pure_ssvep_render_stats",
+            block_index=trial.block_index,
+            trial_index_in_block=trial.trial_index_in_block,
+            global_trial_index=trial.global_trial_index,
+            condition=trial.condition,
+            trial_type=trial.trial_type,
+            phase_name=phase.phase_name,
+            ssvep_target_side=trial.ssvep_target_side,
+            ssvep_target_freq_hz=trial.ssvep_target_freq_hz,
+            note=stats_note,
+        )
+        phase_end_note = f"{phase.note}; {stats_note}"
     elif phase.screen_kind == "mi_ssvep":
         # SSVEP stats: 记录 rendered_frames / elapsed_s / freq_hz 用于帧率分析
         stats = show_ssvep_phase(ui, phase, config.ssvep, on_flip=on_flip)
@@ -5149,14 +5239,16 @@ def show_session_dialog(args: argparse.Namespace,
     ttk.Label(ssvep_frame, text="Hz").grid(row=3, column=2, sticky="w", pady=2)
 
     # 显示模式
-    ttk.Label(ssvep_frame, text="显示模式").grid(row=4, column=0, sticky="w", pady=2)
+    _ssvep_display_mode_label = ttk.Label(ssvep_frame, text="显示模式")
+    _ssvep_display_mode_label.grid(row=4, column=0, sticky="w", pady=2)
     ssvep_display_mode_var = tk.StringVar(value=str(defaults.get("ssvep_display_mode", "single_side")))
     ssvep_display_mode_combo = ttk.Combobox(ssvep_frame, textvariable=ssvep_display_mode_var,
                                              values=["single_side", "both_sides", "single_center"],
                                              state="readonly", width=12)
     ssvep_display_mode_combo.grid(row=4, column=1, sticky="w", pady=2, padx=(10, 0))
-    ttk.Label(ssvep_frame, text="(single_side=仅目标侧, both_sides=双侧, single_center=居中)").grid(
-        row=4, column=2, sticky="w", pady=2, padx=(5, 0))
+    _ssvep_display_mode_desc = ttk.Label(ssvep_frame, text="(single_side=仅目标侧, both_sides=双侧, single_center=居中)")
+    _ssvep_display_mode_desc.grid(row=4, column=2, sticky="w", pady=2, padx=(5, 0))
+    _ssvep_display_mode_widgets: list = [_ssvep_display_mode_label, ssvep_display_mode_combo, _ssvep_display_mode_desc]
 
     # ── P300 特定选项（仅 trial_mode == mi_p300 时可见）──
     p300_frame = ttk.LabelFrame(main_frame, text="P300 设置", padding=8)
@@ -5590,6 +5682,14 @@ def show_session_dialog(args: argparse.Namespace,
             ssvep_arousal_frame.grid_forget()
             ssvep_serial_frame.grid_forget()
             ssvep_rt_frame.grid_forget()
+            # pure_ssvep: force both_sides, hide display_mode row
+            if trial_var.get() == "pure_ssvep":
+                ssvep_display_mode_var.set("both_sides")
+                for w in _ssvep_display_mode_widgets:
+                    w.grid_remove()
+            else:
+                for w in _ssvep_display_mode_widgets:
+                    w.grid()
         elif trial_var.get() == "mi_p300":
             ssvep_frame.grid_forget()
             p300_frame.grid(row=p300_frame_row, column=0, columnspan=3, sticky="ew", pady=(8, 4))
@@ -5636,6 +5736,10 @@ def show_session_dialog(args: argparse.Namespace,
         ssvep_arousal_frame.grid_forget()
         ssvep_serial_frame.grid_forget()
         ssvep_rt_frame.grid_forget()
+        if trial_var.get() == "pure_ssvep":
+            ssvep_display_mode_var.set("both_sides")
+            for w in _ssvep_display_mode_widgets:
+                w.grid_remove()
     elif trial_var.get() == "mi_p300":
         ssvep_frame.grid_forget()
         ssvep_arousal_frame.grid_forget()
@@ -5979,11 +6083,18 @@ def show_session_dialog(args: argparse.Namespace,
 def main() -> int:
     try:
         args = parse_args()
+        # pure_ssvep bare mode: CLI flag → skip dialog; dialog selection → redirect after dialog
+        if args.trial_mode == "pure_ssvep":
+            return _run_pure_ssvep_bare_from_args(args)
+
         defaults = _load_dialog_defaults(args)
         args = show_session_dialog(args, defaults)
         if args is None:
             print("用户取消，退出。")
             return 0
+        if args.trial_mode == "pure_ssvep":
+            return _run_pure_ssvep_bare_from_args(args)
+
         config = build_config(args)
         return run_session(config)
     except Exception as exc:
@@ -5991,6 +6102,18 @@ def main() -> int:
         import traceback
         traceback.print_exc()
         return 1
+
+
+def _run_pure_ssvep_bare_from_args(args) -> int:
+    """Build config from args (CLI or dialog), then run bare continuous flicker."""
+    config = build_config(args)
+    win = create_window(config.display)
+    setattr(win, "windowedSize", (config.display.window_width, config.display.window_height))
+    ui = SessionUI(win, config.stimuli, config.display)
+    ui.win.mouseVisible = False
+    run_pure_ssvep_bare(win, config, ui)
+    win.close()
+    return 0
 
 
 # 三种启动模式：全屏阻塞 / 检测-尝试 / 直接开始
